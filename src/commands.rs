@@ -7,9 +7,10 @@ use crate::cache::{load_or_build_snapshot, save_snapshot};
 use crate::cli::DEFAULT_CACHE_PATH;
 use crate::snapshot::StopRecord;
 
-const STOP_FUZZY_THRESHOLD: f64 = 0.94;
+const STOP_FUZZY_THRESHOLD: f64 = 0.93;
 
 pub fn cmd_cache_build(source_path: &str, cache_path: &str) -> Result<(), String> {
+    // Build a fresh snapshot from GTFS source files and persist it as cache.
     let snapshot = build_snapshot(source_path)?;
     save_snapshot(cache_path, &snapshot)?;
 
@@ -24,6 +25,7 @@ pub fn cmd_cache_build(source_path: &str, cache_path: &str) -> Result<(), String
 }
 
 pub fn cmd_gtfs_summary(source_path: &str) -> Result<(), String> {
+    // Reuse cache when possible, otherwise build it once transparently.
     let snapshot = load_or_build_snapshot(source_path, DEFAULT_CACHE_PATH)?;
 
     println!("GTFS summary for {source_path} (via cache: {DEFAULT_CACHE_PATH})");
@@ -38,6 +40,7 @@ pub fn cmd_gtfs_summary(source_path: &str) -> Result<(), String> {
 }
 
 pub fn cmd_list_routes(source_path: &str) -> Result<(), String> {
+    // Load snapshot and print a compact route table.
     let snapshot = load_or_build_snapshot(source_path, DEFAULT_CACHE_PATH)?;
 
     println!(
@@ -58,6 +61,7 @@ pub fn cmd_list_routes(source_path: &str) -> Result<(), String> {
 pub fn cmd_route_stops(source_path: &str, route_name: &str, show_all: bool) -> Result<(), String> {
     let snapshot = load_or_build_snapshot(source_path, DEFAULT_CACHE_PATH)?;
 
+    // Accept either route short name (e.g. "U1") or explicit route id.
     let query_upper = route_name.to_ascii_uppercase();
 
     let mut route_ids: HashSet<String> = snapshot
@@ -80,6 +84,7 @@ pub fn cmd_route_stops(source_path: &str, route_name: &str, show_all: bool) -> R
         ));
     }
 
+    // Stable ordering for deterministic output.
     let mut ordered_route_ids: Vec<String> = route_ids.into_iter().collect();
     ordered_route_ids.sort();
 
@@ -89,6 +94,7 @@ pub fn cmd_route_stops(source_path: &str, route_name: &str, show_all: bool) -> R
         .map(|route| (route.id.as_str(), route))
         .collect();
 
+    // Skip routes that have no stop sequence in the snapshot.
     let mut found_any = false;
     for route_id in &ordered_route_ids {
         if snapshot.route_stops_by_route_id.contains_key(route_id) {
@@ -101,6 +107,7 @@ pub fn cmd_route_stops(source_path: &str, route_name: &str, show_all: bool) -> R
         return Err(format!("No stops found for route '{route_name}'."));
     }
 
+    // Prefer variants with more stops; this approximates the "main" variant.
     let mut candidates: Vec<(String, usize)> = ordered_route_ids
         .iter()
         .filter_map(|route_id| {
@@ -112,6 +119,7 @@ pub fn cmd_route_stops(source_path: &str, route_name: &str, show_all: bool) -> R
         .collect();
     candidates.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
 
+    // Either print all variants or just the best (longest) one.
     let selected_ids: Vec<String> = if show_all {
         candidates
             .into_iter()
@@ -172,6 +180,7 @@ fn route_labels_for_ids(
     route_ids: &[String],
     route_by_id: &HashMap<&str, &crate::snapshot::RouteEntry>,
 ) -> Vec<String> {
+    // Resolve ids to readable labels and keep them consistently sorted.
     let mut rows: Vec<(String, String, String)> = route_ids
         .iter()
         .map(|route_id| {
@@ -197,6 +206,7 @@ fn collect_route_ids_for_stop_with_children(
     children_by_parent: &HashMap<&str, Vec<&StopRecord>>,
     route_ids_by_stop_id: &HashMap<String, Vec<String>>,
 ) -> Vec<String> {
+    // Collect routes for a stop and merge routes from child platforms/quays.
     let mut route_ids: HashSet<String> = route_ids_by_stop_id
         .get(&stop.id)
         .cloned()
@@ -229,6 +239,7 @@ pub fn cmd_stop_inspect(source_path: &str, query: &str) -> Result<(), String> {
         .map(|stop| (stop.id.as_str(), stop))
         .collect();
 
+    // Build parent -> children index once so station-level lookups can include platforms.
     let mut children_by_parent: HashMap<&str, Vec<&StopRecord>> = HashMap::new();
     for stop in &snapshot.stops {
         if let Some(parent_id) = &stop.parent_station {
@@ -239,6 +250,7 @@ pub fn cmd_stop_inspect(source_path: &str, query: &str) -> Result<(), String> {
         }
     }
 
+    // Matching strategy (in order): exact id, exact code, exact name, fuzzy name.
     let mut match_mode = "partial match (name/id/code)";
     let mut matched_ids: Vec<String> = snapshot
         .stops
@@ -264,6 +276,7 @@ pub fn cmd_stop_inspect(source_path: &str, query: &str) -> Result<(), String> {
     }
 
     if matched_ids.is_empty() {
+        // Fuzzy fallback only accepts high-confidence matches.
         let mut best_name_upper: Option<&String> = None;
         let mut best_score = 0.0f64;
 
@@ -288,6 +301,7 @@ pub fn cmd_stop_inspect(source_path: &str, query: &str) -> Result<(), String> {
     }
 
     if matched_ids.is_empty() {
+        // Final fallback: show a few human-friendly suggestions.
         let query_upper = query.to_ascii_uppercase();
 
         let mut suggestions: Vec<String> = snapshot
@@ -324,6 +338,7 @@ pub fn cmd_stop_inspect(source_path: &str, query: &str) -> Result<(), String> {
     matched_ids.sort();
     matched_ids.dedup();
 
+    // Rank matches by how many routes they expose (including child stops).
     let mut ranked: Vec<(usize, String)> = matched_ids
         .into_iter()
         .filter_map(|stop_id| {
@@ -352,6 +367,7 @@ pub fn cmd_stop_inspect(source_path: &str, query: &str) -> Result<(), String> {
     println!("Stop inspect for '{query}' in {source_path} (via cache: {DEFAULT_CACHE_PATH})");
     println!("Match mode: {match_mode}");
 
+    // Print each matched stop with metadata and serving routes.
     for stop_id in selected_stop_ids {
         if let Some(stop) = stop_by_id.get(stop_id.as_str()) {
             let route_ids = collect_route_ids_for_stop_with_children(

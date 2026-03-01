@@ -10,6 +10,7 @@ Commands:
   hello                                       Print "hello world"
   gtfs-summary                                Show high-level GTFS dataset stats
   routes                                      List all routes (id, short name, long name)
+  route-plan <from> <to>                      Plan a route between two stops (id/name)
   route-stops <route> [--all]                 List stops in order for a route (default: longest variant only)
   stop-inspect <query>                        Inspect stop by id/code/name and list serving routes
   cache-build [gtfs_path] [cache_file]        Build binary cache file (default: gtfs.cache.bin)
@@ -20,6 +21,7 @@ Options:
 
 Examples:
   oeffi cache-build
+  oeffi route-plan "Karlsplatz" "Praterstern"
   oeffi route-stops U1
   oeffi route-stops U1 --all
   oeffi stop-inspect Karlsplatz
@@ -31,6 +33,10 @@ pub enum Command {
     Hello,
     GtfsSummary,
     ListRoutes,
+    RoutePlan {
+        from: String,
+        to: String,
+    },
     RouteStops {
         route: String,
         show_all: bool,
@@ -67,6 +73,13 @@ pub fn parse_command(args: &[String]) -> Result<Command, String> {
         "help" if args.len() == 1 => Ok(Command::Help),
         "gtfs-summary" if args.len() == 1 => Ok(Command::GtfsSummary),
         "routes" if args.len() == 1 => Ok(Command::ListRoutes),
+        "route-plan" if args.len() == 3 => Ok(Command::RoutePlan {
+            from: args[1].clone(),
+            to: args[2].clone(),
+        }),
+        "route-plan" => {
+            Err("Invalid arguments for 'route-plan'. Usage: oeffi route-plan <from> <to>".to_string())
+        }
         "route-stops" => {
             if args.len() < 2 || args.len() > 3 {
                 return Err(
@@ -147,6 +160,19 @@ mod tests {
         assert!(matches!(
             parse_command(&args),
             Ok(Command::RouteStops { route, show_all }) if route == "U1" && !show_all
+        ));
+    }
+
+    #[test]
+    fn parses_route_plan() {
+        let args = vec![
+            "route-plan".to_string(),
+            "Karlsplatz".to_string(),
+            "Praterstern".to_string(),
+        ];
+        assert!(matches!(
+            parse_command(&args),
+            Ok(Command::RoutePlan { from, to }) if from == "Karlsplatz" && to == "Praterstern"
         ));
     }
 
