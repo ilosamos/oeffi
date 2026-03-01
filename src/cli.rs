@@ -7,7 +7,6 @@ Usage:
   oeffi <command>
 
 Commands:
-  hello                                       Print "hello world"
   gtfs-summary                                Show high-level GTFS dataset stats
   routes                                      List all routes (id, short name, long name)
   route-plan <from> <to> [--debug] [--alts N] Plan a route between two stops (id/name)
@@ -31,7 +30,6 @@ Examples:
 
 #[derive(Debug)]
 pub enum Command {
-    Hello,
     GtfsSummary,
     ListRoutes,
     RoutePlan {
@@ -72,7 +70,6 @@ pub fn parse_command(args: &[String]) -> Result<Command, String> {
     }
 
     match args[0].as_str() {
-        "hello" if args.len() == 1 => Ok(Command::Hello),
         "help" if args.len() == 1 => Ok(Command::Help),
         "gtfs-summary" if args.len() == 1 => Ok(Command::GtfsSummary),
         "routes" if args.len() == 1 => Ok(Command::ListRoutes),
@@ -192,7 +189,7 @@ pub fn parse_command(args: &[String]) -> Result<Command, String> {
             "Invalid arguments for 'cache-build'. Usage: oeffi cache-build [gtfs_path] [cache_file]"
                 .to_string(),
         ),
-        "hello" | "help" | "gtfs-summary" | "routes" => {
+        "help" | "gtfs-summary" | "routes" => {
             Err(format!("Too many arguments for command '{}'.", args[0]))
         }
         unknown => Err(format!("Unknown command: '{unknown}'")),
@@ -202,12 +199,6 @@ pub fn parse_command(args: &[String]) -> Result<Command, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn parses_hello() {
-        let args = vec!["hello".to_string()];
-        assert!(matches!(parse_command(&args), Ok(Command::Hello)));
-    }
 
     #[test]
     fn parses_gtfs_summary_with_default_file() {

@@ -1,8 +1,10 @@
 mod build;
 mod cache;
+mod cache_meta;
 mod cli;
 mod clustering;
 mod commands;
+mod matcher;
 mod route_planner;
 mod snapshot;
 
@@ -13,10 +15,6 @@ use cli::{Command, DEFAULT_GTFS_PATH, USAGE, parse_command};
 
 fn run(command: Command) -> ExitCode {
     let result = match command {
-        Command::Hello => {
-            println!("hello world");
-            Ok(())
-        }
         Command::GtfsSummary => commands::cmd_gtfs_summary(DEFAULT_GTFS_PATH),
         Command::ListRoutes => commands::cmd_list_routes(DEFAULT_GTFS_PATH),
         Command::RoutePlan {

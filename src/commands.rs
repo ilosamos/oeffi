@@ -1,10 +1,9 @@
 use std::collections::{HashMap, HashSet};
 
-use strsim::jaro_winkler;
-
 use crate::build::build_snapshot;
 use crate::cache::{load_or_build_snapshot, save_snapshot};
 use crate::cli::DEFAULT_CACHE_PATH;
+use crate::matcher::{exact_key_case_insensitive, fuzzy_best_key};
 use crate::route_planner::rebuild_planner_cache;
 use crate::snapshot::{StopCluster, StopRecord};
 
@@ -246,11 +245,9 @@ pub fn cmd_stop_inspect(source_path: &str, query: &str) -> Result<(), String> {
         .unwrap_or_default();
 
     if matched_cluster_idxs.is_empty() {
-        for (key, idx) in &snapshot.stop_cluster_idx_by_key {
-            if key.eq_ignore_ascii_case(query) {
-                matched_cluster_idxs = vec![*idx];
-                break;
-            }
+        if let Some((_, idx)) = exact_key_case_insensitive(&snapshot.stop_cluster_idx_by_key, query)
+        {
+            matched_cluster_idxs = vec![*idx];
         }
         if !matched_cluster_idxs.is_empty() {
             match_mode = "exact cluster key";
@@ -304,53 +301,35 @@ pub fn cmd_stop_inspect(source_path: &str, query: &str) -> Result<(), String> {
     }
 
     if matched_cluster_idxs.is_empty() {
-        let mut best_name_upper: Option<&String> = None;
-        let mut best_score = 0.0f64;
-
-        for cluster_name_upper in snapshot.stop_cluster_idxs_by_name_upper.keys() {
-            let score = jaro_winkler(&query_upper, cluster_name_upper);
-            if score > best_score {
-                best_score = score;
-                best_name_upper = Some(cluster_name_upper);
-            }
-        }
-
-        if best_score >= STOP_FUZZY_THRESHOLD {
-            if let Some(name_upper) = best_name_upper {
-                matched_cluster_idxs = snapshot
-                    .stop_cluster_idxs_by_name_upper
-                    .get(name_upper)
-                    .cloned()
-                    .unwrap_or_default();
-                match_mode = "fuzzy stop/station name";
-            }
+        if let Some(name_upper) = fuzzy_best_key(
+            &query_upper,
+            snapshot.stop_cluster_idxs_by_name_upper.keys().cloned(),
+            STOP_FUZZY_THRESHOLD,
+        ) {
+            matched_cluster_idxs = snapshot
+                .stop_cluster_idxs_by_name_upper
+                .get(&name_upper)
+                .cloned()
+                .unwrap_or_default();
+            match_mode = "fuzzy stop/station name";
         }
     }
 
     if matched_cluster_idxs.is_empty() {
         // Fallback fuzzy on stop names if cluster names had no match.
-        let mut best_stop_name_upper: Option<&String> = None;
-        let mut best_score = 0.0f64;
-
-        for stop_name_upper in snapshot.stop_ids_by_name_upper.keys() {
-            let score = jaro_winkler(&query_upper, stop_name_upper);
-            if score > best_score {
-                best_score = score;
-                best_stop_name_upper = Some(stop_name_upper);
-            }
-        }
-
-        if best_score >= STOP_FUZZY_THRESHOLD {
-            if let Some(name_upper) = best_stop_name_upper {
-                matched_cluster_idxs = snapshot
-                    .stop_ids_by_name_upper
-                    .get(name_upper)
-                    .into_iter()
-                    .flat_map(|ids| ids.iter())
-                    .filter_map(|stop_id| snapshot.stop_id_to_cluster_idx.get(stop_id).copied())
-                    .collect();
-                match_mode = "fuzzy stop name";
-            }
+        if let Some(name_upper) = fuzzy_best_key(
+            &query_upper,
+            snapshot.stop_ids_by_name_upper.keys().cloned(),
+            STOP_FUZZY_THRESHOLD,
+        ) {
+            matched_cluster_idxs = snapshot
+                .stop_ids_by_name_upper
+                .get(&name_upper)
+                .into_iter()
+                .flat_map(|ids| ids.iter())
+                .filter_map(|stop_id| snapshot.stop_id_to_cluster_idx.get(stop_id).copied())
+                .collect();
+            match_mode = "fuzzy stop name";
         }
     }
 

@@ -2,7 +2,8 @@ use std::fs::File;
 use std::io::{BufReader, BufWriter};
 use std::path::Path;
 
-use crate::build::{build_snapshot, compute_source_fingerprint};
+use crate::build::build_snapshot;
+use crate::cache_meta::fingerprint_is_fresh;
 use crate::snapshot::{SNAPSHOT_VERSION, Snapshot};
 
 const SNAPSHOT_DECODE_LIMIT_BYTES: u64 = 256 * 1024 * 1024;
@@ -37,9 +38,7 @@ pub fn cache_is_fresh(snapshot: &Snapshot, source_path: &str) -> Result<bool, St
     if snapshot.version != SNAPSHOT_VERSION {
         return Ok(false);
     }
-
-    let current = compute_source_fingerprint(source_path)?;
-    Ok(snapshot.fingerprint == current)
+    fingerprint_is_fresh(&snapshot.fingerprint, source_path)
 }
 
 pub fn load_or_build_snapshot(source_path: &str, cache_path: &str) -> Result<Snapshot, String> {

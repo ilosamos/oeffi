@@ -2,7 +2,9 @@
 
 ## Project Summary
 - Rust CLI tool for inspecting and routing on Wiener Linien GTFS data.
-- Uses one unified cache file (`oeffi.cache.bin`) built from `data/` GTFS text files.
+- Uses two cache files built from `data/` GTFS text files:
+  - `gtfs.cache.bin` for snapshot/inspect commands
+  - `planner.cache.bin` for route planning
 - Main commands: `gtfs-summary`, `routes`, `route-stops`, `stop-inspect`, `route-plan`, `cache-build`.
 
 ## Quick File Tree
@@ -24,12 +26,21 @@
 │   ├── main.rs
 │   ├── cli.rs
 │   ├── cache.rs
+│   ├── cache_meta.rs
 │   ├── build.rs
 │   ├── commands.rs
+│   ├── matcher.rs
 │   ├── route_planner.rs
+│   ├── route_planner/
+│   │   ├── model.rs
+│   │   ├── cache.rs
+│   │   ├── query.rs
+│   │   ├── output.rs
+│   │   └── raptor_adapter.rs
 │   ├── snapshot.rs
 │   └── clustering.rs
-└── oeffi.cache.bin
+├── gtfs.cache.bin
+└── planner.cache.bin
 ```
 
 ## GTFS TXT Structure (Samples)
@@ -85,4 +96,3 @@ service_id,date,exception_type
 "T0#1","20251224","2"
 "T0#1","20251225","2"
 ```
-
