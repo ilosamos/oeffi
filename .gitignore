@@ -3,3 +3,4 @@
 *.zip
 data/*
 .DS_Store
+*.cache.bin
