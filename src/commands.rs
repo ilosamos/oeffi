@@ -1,9 +1,13 @@
 use std::collections::{HashMap, HashSet};
 
+use strsim::jaro_winkler;
+
 use crate::build::build_snapshot;
 use crate::cache::{load_or_build_snapshot, save_snapshot};
 use crate::cli::DEFAULT_CACHE_PATH;
 use crate::snapshot::StopRecord;
+
+const STOP_FUZZY_THRESHOLD: f64 = 0.94;
 
 pub fn cmd_cache_build(source_path: &str, cache_path: &str) -> Result<(), String> {
     let snapshot = build_snapshot(source_path)?;
@@ -260,20 +264,27 @@ pub fn cmd_stop_inspect(source_path: &str, query: &str) -> Result<(), String> {
     }
 
     if matched_ids.is_empty() {
-        matched_ids = snapshot
-            .stops
-            .iter()
-            .filter(|stop| {
-                stop.id.to_ascii_uppercase().contains(&query_upper)
-                    || stop.name.to_ascii_uppercase().contains(&query_upper)
-                    || stop
-                        .code
-                        .as_ref()
-                        .map(|code| code.to_ascii_uppercase().contains(&query_upper))
-                        .unwrap_or(false)
-            })
-            .map(|stop| stop.id.clone())
-            .collect();
+        let mut best_name_upper: Option<&String> = None;
+        let mut best_score = 0.0f64;
+
+        for stop_name_upper in snapshot.stop_ids_by_name_upper.keys() {
+            let score = jaro_winkler(&query_upper, stop_name_upper);
+            if score > best_score {
+                best_score = score;
+                best_name_upper = Some(stop_name_upper);
+            }
+        }
+
+        if best_score >= STOP_FUZZY_THRESHOLD {
+            if let Some(name_upper) = best_name_upper {
+                matched_ids = snapshot
+                    .stop_ids_by_name_upper
+                    .get(name_upper)
+                    .cloned()
+                    .unwrap_or_default();
+                match_mode = "fuzzy stop name";
+            }
+        }
     }
 
     if matched_ids.is_empty() {
@@ -306,7 +317,7 @@ pub fn cmd_stop_inspect(source_path: &str, query: &str) -> Result<(), String> {
         };
 
         return Err(format!(
-            "No stops found for query '{query}'.\nSearched fields: stop id, stop code, and stop name (exact and partial).\n{suggestion_text}\nExamples:\n  oeffi stop-inspect \"Karlsplatz\"\n  oeffi stop-inspect \"at:49:657:0:8\""
+            "No stops found for query '{query}'.\nSearched fields: stop id, stop code, exact stop name, and high-confidence fuzzy stop name.\n{suggestion_text}\nExamples:\n  oeffi stop-inspect \"Karlsplatz\"\n  oeffi stop-inspect \"at:49:657:0:8\""
         ));
     }
 
