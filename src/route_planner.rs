@@ -20,6 +20,7 @@ use crate::snapshot::SourceFingerprint;
 const STOP_FUZZY_THRESHOLD: f64 = 0.94;
 const MAX_TRANSFERS: usize = 6;
 const SAME_STATION_TRANSFER_SECONDS: usize = 120;
+const MIN_TRANSFER_BETWEEN_LEGS_SECONDS: usize = 120;
 const DEFAULT_TRANSFER_SECONDS: usize = 300;
 const PLANNER_CACHE_PATH: &str = "planner.cache.bin";
 const PLANNER_CACHE_VERSION: u32 = 1;
@@ -581,13 +582,28 @@ fn match_station_idxs(cache: &PlannerCache, query: &str) -> Vec<u32> {
     Vec::new()
 }
 
-fn station_label(cache: &PlannerCache, station_idx: u32) -> String {
+fn station_label_debug(cache: &PlannerCache, station_idx: u32) -> String {
     let station = &cache.stations[station_idx as usize];
-    format!(
-        "{} ({} stop IDs)",
-        station.name,
-        station.member_stop_ids.len()
-    )
+    let preview: Vec<&str> = station
+        .member_stop_ids
+        .iter()
+        .take(3)
+        .map(|s| s.as_str())
+        .collect();
+    let suffix = if station.member_stop_ids.len() > 3 {
+        format!(" +{} more", station.member_stop_ids.len() - 3)
+    } else {
+        String::new()
+    };
+    format!("{} [{}{}]", station.name, preview.join(", "), suffix)
+}
+
+fn station_label(cache: &PlannerCache, station_idx: u32, debug: bool) -> String {
+    if debug {
+        station_label_debug(cache, station_idx)
+    } else {
+        cache.stations[station_idx as usize].name.clone()
+    }
 }
 
 fn better_journey(candidate: &Journey<u32, u32>, current_best: &Journey<u32, u32>) -> bool {
@@ -598,7 +614,117 @@ fn better_journey(candidate: &Journey<u32, u32>, current_best: &Journey<u32, u32
     }
 }
 
-fn print_journey(cache: &PlannerCache, start_station_idx: u32, journey: &Journey<u32, u32>) {
+#[derive(Debug, Clone)]
+struct LegTiming {
+    route_idx: u32,
+    from_station_idx: u32,
+    to_station_idx: u32,
+    departure: usize,
+    arrival: usize,
+    stops_count: usize,
+}
+
+fn compute_stops_count(cache: &PlannerCache, route_idx: u32, from: u32, to: u32) -> usize {
+    let map = &cache.route_station_pos[route_idx as usize];
+    let from_pos = map.get(&from).copied().unwrap_or(0);
+    let to_pos = map.get(&to).copied().unwrap_or(from_pos);
+    to_pos.saturating_sub(from_pos)
+}
+
+fn build_leg_timings(
+    cache: &PlannerCache,
+    start_station_idx: u32,
+    journey: &Journey<u32, u32>,
+    depart_secs: usize,
+    min_transfer_between_legs_secs: usize,
+) -> Result<Vec<LegTiming>, String> {
+    let timetable = PlannerTimetable { cache };
+    let mut out = Vec::new();
+    let mut current_from = start_station_idx;
+    let mut earliest_departure = depart_secs;
+
+    for (route_idx, drop_station_idx) in &journey.plan {
+        let Some(trip_idx) =
+            timetable.get_earliest_trip(*route_idx, earliest_departure, current_from)
+        else {
+            return Err(format!(
+                "Cannot reconstruct leg timing for route {} from {}.",
+                route_idx,
+                station_label_debug(cache, current_from)
+            ));
+        };
+
+        let departure = timetable.get_departure_time(trip_idx, current_from);
+        let arrival = timetable.get_arrival_time(trip_idx, *drop_station_idx);
+        let stops_count = compute_stops_count(cache, *route_idx, current_from, *drop_station_idx);
+
+        out.push(LegTiming {
+            route_idx: *route_idx,
+            from_station_idx: current_from,
+            to_station_idx: *drop_station_idx,
+            departure,
+            arrival,
+            stops_count,
+        });
+
+        current_from = *drop_station_idx;
+        earliest_departure = arrival.saturating_add(min_transfer_between_legs_secs);
+    }
+
+    Ok(out)
+}
+
+fn evaluate_journey_arrival_with_transfer_slack(
+    cache: &PlannerCache,
+    start_station_idx: u32,
+    journey: &Journey<u32, u32>,
+    depart_secs: usize,
+) -> Option<usize> {
+    let legs = build_leg_timings(
+        cache,
+        start_station_idx,
+        journey,
+        depart_secs,
+        MIN_TRANSFER_BETWEEN_LEGS_SECONDS,
+    )
+    .ok()?;
+    Some(legs.last().map(|l| l.arrival).unwrap_or(depart_secs))
+}
+
+fn print_journey(cache: &PlannerCache, leg_timings: &[LegTiming], debug: bool) {
+    for (idx, leg) in leg_timings.iter().enumerate() {
+        let route = &cache.routes[leg.route_idx as usize];
+        let from_label = station_label(cache, leg.from_station_idx, debug);
+        let to_label = station_label(cache, leg.to_station_idx, debug);
+        println!(
+            "  {}. Ride {} [{}] {} -> {}",
+            idx + 1,
+            route.short_name,
+            route.base_route_id,
+            from_label,
+            to_label
+        );
+        println!(
+            "     dep {} | arr {} | {} stops",
+            format_secs_hhmm(leg.departure),
+            format_secs_hhmm(leg.arrival),
+            leg.stops_count
+        );
+
+        if leg_timings.get(idx + 1).is_some() {
+            println!(
+                "     transfer at {}",
+                station_label(cache, leg.to_station_idx, debug)
+            );
+        }
+    }
+}
+
+fn print_journey_compact(
+    cache: &PlannerCache,
+    start_station_idx: u32,
+    journey: &Journey<u32, u32>,
+) {
     let mut current_from = start_station_idx;
     for (idx, (route_idx, drop_station_idx)) in journey.plan.iter().enumerate() {
         let route = &cache.routes[*route_idx as usize];
@@ -607,8 +733,8 @@ fn print_journey(cache: &PlannerCache, start_station_idx: u32, journey: &Journey
             idx + 1,
             route.short_name,
             route.base_route_id,
-            station_label(cache, current_from),
-            station_label(cache, *drop_station_idx)
+            station_label_debug(cache, current_from),
+            station_label_debug(cache, *drop_station_idx)
         );
         current_from = *drop_station_idx;
     }
@@ -627,6 +753,7 @@ struct CandidateJourney {
     from_idx: u32,
     to_idx: u32,
     journey: Journey<u32, u32>,
+    adjusted_arrival: usize,
 }
 
 pub fn cmd_route_plan(
@@ -655,7 +782,7 @@ pub fn cmd_route_plan(
     }
 
     let timetable = PlannerTimetable { cache: &cache };
-    let mut best: Option<(u32, u32, Journey<u32, u32>)> = None;
+    let mut best: Option<(u32, u32, Journey<u32, u32>, usize)> = None;
     let mut pair_stats: Vec<EvaluatedPair> = Vec::new();
     let mut candidates: Vec<CandidateJourney> = Vec::new();
 
@@ -674,40 +801,75 @@ pub fn cmd_route_plan(
                 continue;
             }
 
-            let mut local_best = journeys[0].clone();
-            for j in journeys.iter().skip(1) {
-                if better_journey(j, &local_best) {
-                    local_best = j.clone();
+            let mut local_best: Option<(Journey<u32, u32>, usize)> = None;
+            for journey in journeys {
+                let Some(adjusted_arrival) = evaluate_journey_arrival_with_transfer_slack(
+                    &cache,
+                    *from_idx,
+                    &journey,
+                    depart_secs,
+                ) else {
+                    continue;
+                };
+
+                if debug {
+                    candidates.push(CandidateJourney {
+                        from_idx: *from_idx,
+                        to_idx: *to_idx,
+                        journey: journey.clone(),
+                        adjusted_arrival,
+                    });
+                }
+
+                match &local_best {
+                    None => local_best = Some((journey, adjusted_arrival)),
+                    Some((current_best_journey, current_adjusted_arrival)) => {
+                        if adjusted_arrival < *current_adjusted_arrival
+                            || (adjusted_arrival == *current_adjusted_arrival
+                                && better_journey(&journey, current_best_journey))
+                        {
+                            local_best = Some((journey, adjusted_arrival));
+                        }
+                    }
                 }
             }
+
+            let Some((local_best, local_best_adjusted_arrival)) = local_best else {
+                if debug {
+                    pair_stats.push(EvaluatedPair {
+                        from_idx: *from_idx,
+                        to_idx: *to_idx,
+                        pareto_count: 0,
+                        best_journey: None,
+                    });
+                }
+                continue;
+            };
 
             if debug {
                 pair_stats.push(EvaluatedPair {
                     from_idx: *from_idx,
                     to_idx: *to_idx,
-                    pareto_count: journeys.len(),
+                    pareto_count: 1,
                     best_journey: Some(local_best.clone()),
                 });
-                for journey in journeys {
-                    candidates.push(CandidateJourney {
-                        from_idx: *from_idx,
-                        to_idx: *to_idx,
-                        journey,
-                    });
-                }
             }
 
             match &best {
-                None => best = Some((*from_idx, *to_idx, local_best)),
-                Some((_, _, current_best)) if better_journey(&local_best, current_best) => {
-                    best = Some((*from_idx, *to_idx, local_best))
+                None => best = Some((*from_idx, *to_idx, local_best, local_best_adjusted_arrival)),
+                Some((_, _, current_best, current_adjusted_arrival))
+                    if local_best_adjusted_arrival < *current_adjusted_arrival
+                        || (local_best_adjusted_arrival == *current_adjusted_arrival
+                            && better_journey(&local_best, current_best)) =>
+                {
+                    best = Some((*from_idx, *to_idx, local_best, local_best_adjusted_arrival))
                 }
                 _ => {}
             }
         }
     }
 
-    let Some((best_from, best_to, best_journey)) = best else {
+    let Some((best_from, best_to, best_journey, best_adjusted_arrival)) = best else {
         if debug {
             let reachable = pair_stats.iter().filter(|p| p.pareto_count > 0).count();
             let unreachable = pair_stats.iter().filter(|p| p.pareto_count == 0).count();
@@ -728,21 +890,27 @@ pub fn cmd_route_plan(
     println!("Route plan: '{from_query}' -> '{to_query}'");
     println!("Service day: {query_date}");
     println!("Departure (query time): {}", format_secs_hhmm(depart_secs));
-    println!("Arrival: {}", format_secs_hhmm(best_journey.arrival));
-    println!("Model: station-normalized planning (hybrid stop->station cache)");
+    println!("Arrival: {}", format_secs_hhmm(best_adjusted_arrival));
+    if debug {
+        println!("Model: station-normalized planning (hybrid stop->station cache)");
+        println!(
+            "Minimum transfer time between legs: {}",
+            format_delta_secs(MIN_TRANSFER_BETWEEN_LEGS_SECONDS)
+        );
 
-    println!("\nMatched origin stations:");
-    for station_idx in &from_station_idxs {
-        println!("  - {}", station_label(&cache, *station_idx));
-    }
-    println!("Matched destination stations:");
-    for station_idx in &to_station_idxs {
-        println!("  - {}", station_label(&cache, *station_idx));
-    }
+        println!("\nMatched origin stations:");
+        for station_idx in &from_station_idxs {
+            println!("  - {}", station_label(&cache, *station_idx, debug));
+        }
+        println!("Matched destination stations:");
+        for station_idx in &to_station_idxs {
+            println!("  - {}", station_label(&cache, *station_idx, debug));
+        }
 
-    println!("\nChosen station pair:");
-    println!("  from: {}", station_label(&cache, best_from));
-    println!("  to:   {}", station_label(&cache, best_to));
+        println!("\nChosen station pair:");
+        println!("  from: {}", station_label(&cache, best_from, debug));
+        println!("  to:   {}", station_label(&cache, best_to, debug));
+    }
 
     if debug {
         let reachable = pair_stats.iter().filter(|p| p.pareto_count > 0).count();
@@ -774,8 +942,8 @@ pub fn cmd_route_plan(
                 let j = pair.best_journey.as_ref().expect("exists");
                 println!(
                     "    - {} -> {} | arrival {} | legs {} | pareto {}",
-                    station_label(&cache, pair.from_idx),
-                    station_label(&cache, pair.to_idx),
+                    station_label_debug(&cache, pair.from_idx),
+                    station_label_debug(&cache, pair.to_idx),
                     format_secs_hhmm(j.arrival),
                     j.plan.len(),
                     pair.pareto_count
@@ -790,42 +958,70 @@ pub fn cmd_route_plan(
     }
 
     println!("\nItinerary (RAPTOR plan):");
-    print_journey(&cache, best_from, &best_journey);
+    match build_leg_timings(
+        &cache,
+        best_from,
+        &best_journey,
+        depart_secs,
+        MIN_TRANSFER_BETWEEN_LEGS_SECONDS,
+    ) {
+        Ok(legs) => print_journey(&cache, &legs, debug),
+        Err(_) => print_journey_compact(&cache, best_from, &best_journey),
+    }
 
     if debug && !candidates.is_empty() {
         candidates.sort_by(|a, b| {
-            a.journey
-                .arrival
-                .cmp(&b.journey.arrival)
+            a.adjusted_arrival
+                .cmp(&b.adjusted_arrival)
+                .then(a.journey.arrival.cmp(&b.journey.arrival))
                 .then(a.journey.plan.len().cmp(&b.journey.plan.len()))
         });
+
+        let best_journey_signature = (
+            best_from,
+            best_to,
+            best_journey.plan.clone(),
+            best_adjusted_arrival,
+        );
 
         let mut shown = 0usize;
         println!("\nAlternatives (why not picked):");
         for alt in candidates {
-            let is_same_as_best = alt.from_idx == best_from
-                && alt.to_idx == best_to
-                && alt.journey.arrival == best_journey.arrival
-                && alt.journey.plan == best_journey.plan;
+            let is_same_as_best = (
+                alt.from_idx,
+                alt.to_idx,
+                alt.journey.plan.clone(),
+                alt.adjusted_arrival,
+            ) == best_journey_signature;
             if is_same_as_best {
                 continue;
             }
 
             shown += 1;
-            let delay = alt.journey.arrival.saturating_sub(best_journey.arrival);
+            let delay = alt.adjusted_arrival.saturating_sub(best_adjusted_arrival);
             println!(
                 "  Alternative {}: arrival {} ({} later), legs {}",
                 shown,
-                format_secs_hhmm(alt.journey.arrival),
+                format_secs_hhmm(alt.adjusted_arrival),
                 format_delta_secs(delay),
                 alt.journey.plan.len()
             );
             println!(
                 "    pair: {} -> {}",
-                station_label(&cache, alt.from_idx),
-                station_label(&cache, alt.to_idx)
+                station_label_debug(&cache, alt.from_idx),
+                station_label_debug(&cache, alt.to_idx)
             );
-            print_journey(&cache, alt.from_idx, &alt.journey);
+
+            match build_leg_timings(
+                &cache,
+                alt.from_idx,
+                &alt.journey,
+                depart_secs,
+                MIN_TRANSFER_BETWEEN_LEGS_SECONDS,
+            ) {
+                Ok(legs) => print_journey(&cache, &legs, true),
+                Err(_) => print_journey_compact(&cache, alt.from_idx, &alt.journey),
+            }
 
             if shown >= alternatives {
                 break;
