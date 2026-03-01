@@ -1,39 +1,24 @@
 use std::borrow::Cow;
 use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};
-use std::fs::File;
-use std::io::{BufReader, BufWriter};
-use std::path::Path;
-use std::time::{SystemTime, UNIX_EPOCH};
 
-use chrono::{Local, NaiveDate, Timelike};
-use gtfs_structures::{Gtfs, GtfsReader, TransferType};
+use chrono::{Local, Timelike};
+use gtfs_structures::{GtfsReader, TransferType};
 use raptor::{Journey, Timetable};
 use serde::{Deserialize, Serialize};
 use strsim::jaro_winkler;
 
-use crate::build::compute_source_fingerprint;
-use crate::cli::DEFAULT_GTFS_PATH;
+use crate::cache::load_or_build_app_cache;
+use crate::cli::{DEFAULT_CACHE_PATH, DEFAULT_GTFS_PATH};
 use crate::clustering::{ClusterStopAccessor, build_stop_clusters};
 
 const STOP_FUZZY_THRESHOLD: f64 = 0.94;
 const MAX_TRANSFERS: usize = 6;
 const SAME_STATION_WALK_SECONDS: usize = 120;
 const DEFAULT_TRANSFER_SECONDS: usize = 300;
-const PLANNER_CACHE_PATH: &str = "planner.cache.bin";
-const PLANNER_CACHE_VERSION: u32 = 4;
-const PLANNER_CACHE_DECODE_LIMIT_BYTES: u64 = 512 * 1024 * 1024;
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-struct SourceFingerprint {
-    source_path: String,
-    file_count: usize,
-    total_size_bytes: u64,
-    newest_modified_unix_secs: u64,
-}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-struct PlannerStop {
+pub(crate) struct PlannerStop {
     id: String,
     name: String,
     code: Option<String>,
@@ -55,7 +40,7 @@ impl ClusterStopAccessor for PlannerStop {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-struct PlannerRoute {
+pub(crate) struct PlannerRoute {
     base_route_id: String,
     short_name: String,
     long_name: String,
@@ -63,24 +48,20 @@ struct PlannerRoute {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-struct PlannerTrip {
+pub(crate) struct PlannerTrip {
     route_idx: u32,
     times: Vec<(usize, usize)>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-struct PlannerCluster {
+pub(crate) struct PlannerCluster {
     key: String,
     name: String,
     member_stop_idxs: Vec<u32>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-struct PlannerCache {
-    version: u32,
-    built_unix_secs: u64,
-    service_date: String,
-    fingerprint: SourceFingerprint,
+pub(crate) struct PlannerCache {
     stops: Vec<PlannerStop>,
     stop_idx_by_id: HashMap<String, u32>,
     stop_idxs_by_name_upper: HashMap<String, Vec<u32>>,
@@ -193,13 +174,6 @@ impl<'a> Timetable for PlannerTimetable<'a> {
     }
 }
 
-fn now_unix_secs() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0)
-}
-
 fn format_secs_hhmm(secs: usize) -> String {
     let days = secs / 86_400;
     let rem = secs % 86_400;
@@ -212,30 +186,12 @@ fn format_secs_hhmm(secs: usize) -> String {
     }
 }
 
-fn service_active_on_date(gtfs: &Gtfs, date: NaiveDate, service_id: &str) -> bool {
-    gtfs.trip_days(service_id, date).contains(&0)
-}
-
-fn build_planner_cache(service_date: NaiveDate) -> Result<PlannerCache, String> {
-    let mut gtfs = GtfsReader::default()
+pub(crate) fn build_planner_cache(source_path: &str) -> Result<PlannerCache, String> {
+    let gtfs = GtfsReader::default()
         .read_shapes(false)
         .trim_fields(false)
-        .read(DEFAULT_GTFS_PATH)
-        .map_err(|err| format!("Failed to load GTFS from '{}': {err}", DEFAULT_GTFS_PATH))?;
-
-    let mut active_services: HashSet<String> = HashSet::new();
-    let mut checked: HashMap<String, bool> = HashMap::new();
-    for trip in gtfs.trips.values() {
-        let service_id = trip.service_id.clone();
-        let is_active = *checked
-            .entry(service_id.clone())
-            .or_insert_with(|| service_active_on_date(&gtfs, service_date, &service_id));
-        if is_active {
-            active_services.insert(service_id);
-        }
-    }
-    gtfs.trips
-        .retain(|_, trip| active_services.contains(&trip.service_id));
+        .read(source_path)
+        .map_err(|err| format!("Failed to load GTFS from '{}': {err}", source_path))?;
 
     let mut stop_ids: Vec<String> = gtfs.stops.keys().cloned().collect();
     stop_ids.sort();
@@ -438,19 +394,7 @@ fn build_planner_cache(service_date: NaiveDate) -> Result<PlannerCache, String> 
         tos.dedup();
     }
 
-    let src_fp = compute_source_fingerprint(DEFAULT_GTFS_PATH)?;
-    let fingerprint = SourceFingerprint {
-        source_path: src_fp.source_path,
-        file_count: src_fp.file_count,
-        total_size_bytes: src_fp.total_size_bytes,
-        newest_modified_unix_secs: src_fp.newest_modified_unix_secs,
-    };
-
     Ok(PlannerCache {
-        version: PLANNER_CACHE_VERSION,
-        built_unix_secs: now_unix_secs(),
-        service_date: service_date.to_string(),
-        fingerprint,
         stops,
         stop_idx_by_id,
         stop_idxs_by_name_upper,
@@ -467,63 +411,6 @@ fn build_planner_cache(service_date: NaiveDate) -> Result<PlannerCache, String> 
         footpaths,
         transfer_times,
     })
-}
-
-fn save_planner_cache(path: &str, cache: &PlannerCache) -> Result<(), String> {
-    let file = File::create(path)
-        .map_err(|err| format!("Failed to create planner cache '{path}': {err}"))?;
-    let mut writer = BufWriter::new(file);
-    bincode::serialize_into(&mut writer, cache)
-        .map_err(|err| format!("Failed to serialize planner cache '{path}': {err}"))
-}
-
-fn load_planner_cache(path: &str) -> Result<PlannerCache, String> {
-    let file_size = std::fs::metadata(Path::new(path))
-        .map(|m| m.len())
-        .map_err(|err| format!("Failed to read planner cache metadata '{path}': {err}"))?;
-    if file_size > PLANNER_CACHE_DECODE_LIMIT_BYTES {
-        return Err(format!(
-            "Planner cache '{path}' is too large to load safely ({} bytes > {} bytes)",
-            file_size, PLANNER_CACHE_DECODE_LIMIT_BYTES
-        ));
-    }
-
-    let file =
-        File::open(path).map_err(|err| format!("Failed to open planner cache '{path}': {err}"))?;
-    let mut reader = BufReader::new(file);
-    bincode::deserialize_from(&mut reader)
-        .map_err(|err| format!("Failed to deserialize planner cache '{path}': {err}"))
-}
-
-fn planner_cache_fresh(cache: &PlannerCache, service_date: NaiveDate) -> Result<bool, String> {
-    if cache.version != PLANNER_CACHE_VERSION {
-        return Ok(false);
-    }
-    if cache.service_date != service_date.to_string() {
-        return Ok(false);
-    }
-
-    let src_fp = compute_source_fingerprint(DEFAULT_GTFS_PATH)?;
-    let current = SourceFingerprint {
-        source_path: src_fp.source_path,
-        file_count: src_fp.file_count,
-        total_size_bytes: src_fp.total_size_bytes,
-        newest_modified_unix_secs: src_fp.newest_modified_unix_secs,
-    };
-
-    Ok(cache.fingerprint == current)
-}
-
-fn load_or_build_planner_cache(service_date: NaiveDate) -> Result<(PlannerCache, bool), String> {
-    if let Ok(cache) = load_planner_cache(PLANNER_CACHE_PATH) {
-        if planner_cache_fresh(&cache, service_date)? {
-            return Ok((cache, false));
-        }
-    }
-
-    let cache = build_planner_cache(service_date)?;
-    save_planner_cache(PLANNER_CACHE_PATH, &cache)?;
-    Ok((cache, true))
 }
 
 fn match_stop_idxs(cache: &PlannerCache, query: &str) -> Vec<u32> {
@@ -660,7 +547,8 @@ pub fn cmd_route_plan(from_query: &str, to_query: &str) -> Result<(), String> {
     let query_date = now.date_naive();
     let depart_secs = now.time().num_seconds_from_midnight() as usize;
 
-    let (cache, _rebuilt) = load_or_build_planner_cache(query_date)?;
+    let app_cache = load_or_build_app_cache(DEFAULT_GTFS_PATH, DEFAULT_CACHE_PATH)?;
+    let cache = &app_cache.planner;
 
     let from_cluster_idxs = match_cluster_idxs(&cache, from_query);
     if from_cluster_idxs.is_empty() {

@@ -1,5 +1,5 @@
 pub const DEFAULT_GTFS_PATH: &str = "data";
-pub const DEFAULT_CACHE_PATH: &str = "gtfs.cache.bin";
+pub const DEFAULT_CACHE_PATH: &str = "oeffi.cache.bin";
 
 pub const USAGE: &str = r#"oeffi - Wiener Linien GTFS inspector
 
@@ -13,7 +13,7 @@ Commands:
   route-plan <from> <to>                      Plan a route between two stops (id/name)
   route-stops <route> [--all]                 List stops in order for a route (default: longest variant only)
   stop-inspect <query>                        Inspect stop by id/code/name and list serving routes
-  cache-build [gtfs_path] [cache_file]        Build binary cache file (default: gtfs.cache.bin)
+  cache-build [gtfs_path] [cache_file]        Build unified cache file (default: oeffi.cache.bin)
   help                                        Show this help message
 
 Options:
