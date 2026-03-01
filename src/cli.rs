@@ -10,7 +10,7 @@ Commands:
   hello                                       Print "hello world"
   gtfs-summary                                Show high-level GTFS dataset stats
   routes                                      List all routes (id, short name, long name)
-  route-plan <from> <to>                      Plan a route between two stops (id/name)
+  route-plan <from> <to> [--debug] [--alts N] Plan a route between two stops (id/name)
   route-stops <route> [--all]                 List stops in order for a route (default: longest variant only)
   stop-inspect <query>                        Inspect stop by id/code/name and list serving routes
   cache-build [gtfs_path] [cache_file]        Build unified cache file (default: oeffi.cache.bin)
@@ -22,6 +22,7 @@ Options:
 Examples:
   oeffi cache-build
   oeffi route-plan "Karlsplatz" "Praterstern"
+  oeffi route-plan "Herrengasse" "Praterstern" --debug --alts 3
   oeffi route-stops U1
   oeffi route-stops U1 --all
   oeffi stop-inspect Karlsplatz
@@ -36,6 +37,8 @@ pub enum Command {
     RoutePlan {
         from: String,
         to: String,
+        debug: bool,
+        alternatives: usize,
     },
     RouteStops {
         route: String,
@@ -73,12 +76,70 @@ pub fn parse_command(args: &[String]) -> Result<Command, String> {
         "help" if args.len() == 1 => Ok(Command::Help),
         "gtfs-summary" if args.len() == 1 => Ok(Command::GtfsSummary),
         "routes" if args.len() == 1 => Ok(Command::ListRoutes),
-        "route-plan" if args.len() == 3 => Ok(Command::RoutePlan {
-            from: args[1].clone(),
-            to: args[2].clone(),
-        }),
         "route-plan" => {
-            Err("Invalid arguments for 'route-plan'. Usage: oeffi route-plan <from> <to>".to_string())
+            if args.len() < 3 {
+                return Err(
+                    "Invalid arguments for 'route-plan'. Usage: oeffi route-plan <from> <to> [--debug] [--alts N]"
+                        .to_string(),
+                );
+            }
+
+            let from = args[1].clone();
+            let to = args[2].clone();
+            let mut debug = false;
+            let mut alternatives: usize = 3;
+
+            let mut i = 3usize;
+            while i < args.len() {
+                let arg = &args[i];
+                if arg == "--debug" || arg == "-d" {
+                    debug = true;
+                    i += 1;
+                    continue;
+                }
+                if arg == "--alts" {
+                    let value = args.get(i + 1).ok_or_else(|| {
+                        "Missing value for '--alts'. Usage: oeffi route-plan <from> <to> [--debug] [--alts N]"
+                            .to_string()
+                    })?;
+                    alternatives = value.parse::<usize>().map_err(|_| {
+                        format!("Invalid value for '--alts': '{value}'. Expected a positive integer.")
+                    })?;
+                    if alternatives == 0 {
+                        return Err(
+                            "Invalid value for '--alts'. Expected a positive integer."
+                                .to_string(),
+                        );
+                    }
+                    i += 2;
+                    continue;
+                }
+                if let Some(value) = arg.strip_prefix("--alts=") {
+                    alternatives = value.parse::<usize>().map_err(|_| {
+                        format!("Invalid value for '--alts': '{value}'. Expected a positive integer.")
+                    })?;
+                    if alternatives == 0 {
+                        return Err(
+                            "Invalid value for '--alts'. Expected a positive integer."
+                                .to_string(),
+                        );
+                    }
+                    i += 1;
+                    continue;
+                }
+
+                return Err(
+                    "Invalid arguments for 'route-plan'. Usage: oeffi route-plan <from> <to> [--debug] [--alts N]"
+                        .to_string(),
+                );
+            }
+
+            Ok(Command::RoutePlan {
+                from,
+                to,
+                debug,
+                alternatives,
+            })
         }
         "route-stops" => {
             if args.len() < 2 || args.len() > 3 {
@@ -172,7 +233,25 @@ mod tests {
         ];
         assert!(matches!(
             parse_command(&args),
-            Ok(Command::RoutePlan { from, to }) if from == "Karlsplatz" && to == "Praterstern"
+            Ok(Command::RoutePlan { from, to, debug, alternatives })
+                if from == "Karlsplatz" && to == "Praterstern" && !debug && alternatives == 3
+        ));
+    }
+
+    #[test]
+    fn parses_route_plan_debug_with_alts() {
+        let args = vec![
+            "route-plan".to_string(),
+            "Herrengasse".to_string(),
+            "Praterstern".to_string(),
+            "--debug".to_string(),
+            "--alts".to_string(),
+            "5".to_string(),
+        ];
+        assert!(matches!(
+            parse_command(&args),
+            Ok(Command::RoutePlan { from, to, debug, alternatives })
+                if from == "Herrengasse" && to == "Praterstern" && debug && alternatives == 5
         ));
     }
 

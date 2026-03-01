@@ -19,7 +19,12 @@ fn run(command: Command) -> ExitCode {
         }
         Command::GtfsSummary => commands::cmd_gtfs_summary(DEFAULT_GTFS_PATH),
         Command::ListRoutes => commands::cmd_list_routes(DEFAULT_GTFS_PATH),
-        Command::RoutePlan { from, to } => route_planner::cmd_route_plan(&from, &to),
+        Command::RoutePlan {
+            from,
+            to,
+            debug,
+            alternatives,
+        } => route_planner::cmd_route_plan(&from, &to, debug, alternatives),
         Command::RouteStops { route, show_all } => {
             commands::cmd_route_stops(DEFAULT_GTFS_PATH, &route, show_all)
         }

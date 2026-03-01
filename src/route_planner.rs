@@ -542,7 +542,53 @@ fn better_journey(candidate: &Journey<u32, u32>, current_best: &Journey<u32, u32
     }
 }
 
-pub fn cmd_route_plan(from_query: &str, to_query: &str) -> Result<(), String> {
+fn format_delta_secs(secs: usize) -> String {
+    let m = secs / 60;
+    let s = secs % 60;
+    if m > 0 {
+        format!("{m}m {s:02}s")
+    } else {
+        format!("{s}s")
+    }
+}
+
+fn print_journey(cache: &PlannerCache, start_stop_idx: u32, journey: &Journey<u32, u32>) {
+    let mut current_from = start_stop_idx;
+    for (idx, (route_idx, drop_stop_idx)) in journey.plan.iter().enumerate() {
+        let route = &cache.routes[*route_idx as usize];
+        println!(
+            "  {}. Ride {} [{}] {} -> {}",
+            idx + 1,
+            route.short_name,
+            route.base_route_id,
+            stop_label(cache, current_from),
+            stop_label(cache, *drop_stop_idx)
+        );
+        current_from = *drop_stop_idx;
+    }
+}
+
+#[derive(Debug, Clone)]
+struct EvaluatedPair {
+    from_idx: u32,
+    to_idx: u32,
+    pareto_count: usize,
+    best_journey: Option<Journey<u32, u32>>,
+}
+
+#[derive(Debug, Clone)]
+struct CandidateJourney {
+    from_idx: u32,
+    to_idx: u32,
+    journey: Journey<u32, u32>,
+}
+
+pub fn cmd_route_plan(
+    from_query: &str,
+    to_query: &str,
+    debug: bool,
+    alternatives: usize,
+) -> Result<(), String> {
     let now = Local::now();
     let query_date = now.date_naive();
     let depart_secs = now.time().num_seconds_from_midnight() as usize;
@@ -569,11 +615,21 @@ pub fn cmd_route_plan(from_query: &str, to_query: &str) -> Result<(), String> {
     let timetable = PlannerTimetable { cache: &cache };
 
     let mut best: Option<(u32, u32, Journey<u32, u32>)> = None;
+    let mut pair_stats: Vec<EvaluatedPair> = Vec::new();
+    let mut candidates: Vec<CandidateJourney> = Vec::new();
 
     for from_idx in &from_idxs {
         for to_idx in &to_idxs {
             let journeys = timetable.raptor(MAX_TRANSFERS, depart_secs, *from_idx, *to_idx);
             if journeys.is_empty() {
+                if debug {
+                    pair_stats.push(EvaluatedPair {
+                        from_idx: *from_idx,
+                        to_idx: *to_idx,
+                        pareto_count: 0,
+                        best_journey: None,
+                    });
+                }
                 continue;
             }
 
@@ -581,6 +637,23 @@ pub fn cmd_route_plan(from_query: &str, to_query: &str) -> Result<(), String> {
             for j in journeys.iter().skip(1) {
                 if better_journey(j, &local_best) {
                     local_best = j.clone();
+                }
+            }
+
+            if debug {
+                pair_stats.push(EvaluatedPair {
+                    from_idx: *from_idx,
+                    to_idx: *to_idx,
+                    pareto_count: journeys.len(),
+                    best_journey: Some(local_best.clone()),
+                });
+
+                for journey in journeys {
+                    candidates.push(CandidateJourney {
+                        from_idx: *from_idx,
+                        to_idx: *to_idx,
+                        journey,
+                    });
                 }
             }
 
@@ -595,6 +668,17 @@ pub fn cmd_route_plan(from_query: &str, to_query: &str) -> Result<(), String> {
     }
 
     let Some((best_from, best_to, best_journey)) = best else {
+        if debug {
+            let reachable = pair_stats.iter().filter(|p| p.pareto_count > 0).count();
+            let unreachable = pair_stats.iter().filter(|p| p.pareto_count == 0).count();
+            println!("Route plan debug: '{from_query}' -> '{to_query}'");
+            println!(
+                "  evaluated stop pairs: {} | reachable: {} | unreachable: {}",
+                pair_stats.len(),
+                reachable,
+                unreachable
+            );
+        }
         return Err(format!(
             "No route found from '{from_query}' to '{to_query}' for {query_date} after {}.",
             format_secs_hhmm(depart_secs)
@@ -622,24 +706,97 @@ pub fn cmd_route_plan(from_query: &str, to_query: &str) -> Result<(), String> {
     println!("  from: {}", stop_label(&cache, best_from));
     println!("  to:   {}", stop_label(&cache, best_to));
 
+    if debug {
+        let reachable = pair_stats.iter().filter(|p| p.pareto_count > 0).count();
+        let unreachable = pair_stats.iter().filter(|p| p.pareto_count == 0).count();
+        println!("\nDebug summary:");
+        println!(
+            "  evaluated stop pairs: {} | reachable: {} | unreachable: {}",
+            pair_stats.len(),
+            reachable,
+            unreachable
+        );
+
+        let mut best_pairs: Vec<&EvaluatedPair> = pair_stats
+            .iter()
+            .filter(|p| p.best_journey.is_some())
+            .collect();
+        best_pairs.sort_by(|a, b| {
+            let a_best = a.best_journey.as_ref().expect("filtered");
+            let b_best = b.best_journey.as_ref().expect("filtered");
+            a_best
+                .arrival
+                .cmp(&b_best.arrival)
+                .then(a_best.plan.len().cmp(&b_best.plan.len()))
+        });
+
+        if !best_pairs.is_empty() {
+            println!("  top reachable stop pairs:");
+            for pair in best_pairs.into_iter().take(5) {
+                let j = pair.best_journey.as_ref().expect("exists");
+                println!(
+                    "    - {} -> {} | arrival {} | legs {} | pareto {}",
+                    stop_label(cache, pair.from_idx),
+                    stop_label(cache, pair.to_idx),
+                    format_secs_hhmm(j.arrival),
+                    j.plan.len(),
+                    pair.pareto_count
+                );
+            }
+        }
+    }
+
     if best_journey.plan.is_empty() {
         println!("\nNo transit legs needed (already at destination cluster).\n");
         return Ok(());
     }
 
     println!("\nItinerary (RAPTOR plan):");
-    let mut current_from = best_from;
-    for (idx, (route_idx, drop_stop_idx)) in best_journey.plan.iter().enumerate() {
-        let route = &cache.routes[*route_idx as usize];
-        println!(
-            "  {}. Ride {} [{}] {} -> {}",
-            idx + 1,
-            route.short_name,
-            route.base_route_id,
-            stop_label(&cache, current_from),
-            stop_label(&cache, *drop_stop_idx)
-        );
-        current_from = *drop_stop_idx;
+    print_journey(cache, best_from, &best_journey);
+
+    if debug && !candidates.is_empty() {
+        candidates.sort_by(|a, b| {
+            a.journey
+                .arrival
+                .cmp(&b.journey.arrival)
+                .then(a.journey.plan.len().cmp(&b.journey.plan.len()))
+        });
+
+        let mut shown = 0usize;
+        println!("\nAlternatives (why not picked):");
+        for alt in candidates {
+            let is_same_as_best = alt.from_idx == best_from
+                && alt.to_idx == best_to
+                && alt.journey.arrival == best_journey.arrival
+                && alt.journey.plan == best_journey.plan;
+            if is_same_as_best {
+                continue;
+            }
+
+            shown += 1;
+            let delay = alt.journey.arrival.saturating_sub(best_journey.arrival);
+            println!(
+                "  Alternative {}: arrival {} ({} later), legs {}",
+                shown,
+                format_secs_hhmm(alt.journey.arrival),
+                format_delta_secs(delay),
+                alt.journey.plan.len()
+            );
+            println!(
+                "    pair: {} -> {}",
+                stop_label(cache, alt.from_idx),
+                stop_label(cache, alt.to_idx)
+            );
+            print_journey(cache, alt.from_idx, &alt.journey);
+
+            if shown >= alternatives {
+                break;
+            }
+        }
+
+        if shown == 0 {
+            println!("  (No additional alternatives found.)");
+        }
     }
 
     Ok(())
