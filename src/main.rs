@@ -1,6 +1,7 @@
 mod build;
 mod cache;
 mod cli;
+mod clustering;
 mod commands;
 mod route_planner;
 mod snapshot;

@@ -3,6 +3,7 @@ use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};
 use std::fs::File;
 use std::io::{BufReader, BufWriter};
+use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use chrono::{Local, NaiveDate, Timelike};
@@ -13,13 +14,15 @@ use strsim::jaro_winkler;
 
 use crate::build::compute_source_fingerprint;
 use crate::cli::DEFAULT_GTFS_PATH;
+use crate::clustering::{ClusterStopAccessor, build_stop_clusters};
 
 const STOP_FUZZY_THRESHOLD: f64 = 0.94;
 const MAX_TRANSFERS: usize = 6;
 const SAME_STATION_WALK_SECONDS: usize = 120;
 const DEFAULT_TRANSFER_SECONDS: usize = 300;
 const PLANNER_CACHE_PATH: &str = "planner.cache.bin";
-const PLANNER_CACHE_VERSION: u32 = 3;
+const PLANNER_CACHE_VERSION: u32 = 4;
+const PLANNER_CACHE_DECODE_LIMIT_BYTES: u64 = 512 * 1024 * 1024;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 struct SourceFingerprint {
@@ -35,6 +38,20 @@ struct PlannerStop {
     name: String,
     code: Option<String>,
     parent_station: Option<String>,
+}
+
+impl ClusterStopAccessor for PlannerStop {
+    fn id(&self) -> &str {
+        &self.id
+    }
+
+    fn name(&self) -> &str {
+        &self.name
+    }
+
+    fn parent_station(&self) -> Option<&str> {
+        self.parent_station.as_deref()
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -258,56 +275,19 @@ fn build_planner_cache(service_date: NaiveDate) -> Result<PlannerCache, String> 
         }
     }
 
-    let mut clusters: Vec<PlannerCluster> = Vec::new();
-    let mut cluster_idx_by_key: HashMap<String, u32> = HashMap::new();
-    let mut stop_idx_to_cluster_idx: Vec<u32> = vec![0; stops.len()];
-
-    for (stop_idx, stop) in stops.iter().enumerate() {
-        let cluster_key = if let Some(parent) = &stop.parent_station {
-            format!("parent::{parent}")
-        } else if !stop.name.is_empty() {
-            format!("name::{}", stop.name.to_ascii_uppercase())
-        } else {
-            format!("stop::{}", stop.id)
-        };
-
-        let cluster_idx = if let Some(existing) = cluster_idx_by_key.get(&cluster_key).copied() {
-            existing
-        } else {
-            let cluster_name = if let Some(parent_stop_idx) = stop_idx_by_id.get(&cluster_key) {
-                stops[*parent_stop_idx as usize].name.clone()
-            } else {
-                stop.name.clone()
-            };
-
-            let new_idx = clusters.len() as u32;
-            cluster_idx_by_key.insert(cluster_key.clone(), new_idx);
-            clusters.push(PlannerCluster {
-                key: cluster_key,
-                name: cluster_name,
-                member_stop_idxs: Vec::new(),
-            });
-            new_idx
-        };
-
-        clusters[cluster_idx as usize]
-            .member_stop_idxs
-            .push(stop_idx as u32);
-        stop_idx_to_cluster_idx[stop_idx] = cluster_idx;
-    }
-
-    for cluster in &mut clusters {
-        cluster.member_stop_idxs.sort();
-        cluster.member_stop_idxs.dedup();
-    }
-
-    let mut cluster_idxs_by_name_upper: HashMap<String, Vec<u32>> = HashMap::new();
-    for (idx, cluster) in clusters.iter().enumerate() {
-        cluster_idxs_by_name_upper
-            .entry(cluster.name.to_ascii_uppercase())
-            .or_default()
-            .push(idx as u32);
-    }
+    let clustered_stops = build_stop_clusters(&stops, &stop_idx_by_id);
+    let clusters: Vec<PlannerCluster> = clustered_stops
+        .clusters
+        .into_iter()
+        .map(|cluster| PlannerCluster {
+            key: cluster.key,
+            name: cluster.name,
+            member_stop_idxs: cluster.member_stop_idxs,
+        })
+        .collect();
+    let cluster_idx_by_key = clustered_stops.cluster_idx_by_key;
+    let cluster_idxs_by_name_upper = clustered_stops.cluster_idxs_by_name_upper;
+    let stop_idx_to_cluster_idx = clustered_stops.stop_idx_to_cluster_idx;
 
     // Route variants are keyed by base route id + exact stop pattern.
     let mut route_variant_idx: HashMap<(String, Vec<u32>), u32> = HashMap::new();
@@ -498,6 +478,16 @@ fn save_planner_cache(path: &str, cache: &PlannerCache) -> Result<(), String> {
 }
 
 fn load_planner_cache(path: &str) -> Result<PlannerCache, String> {
+    let file_size = std::fs::metadata(Path::new(path))
+        .map(|m| m.len())
+        .map_err(|err| format!("Failed to read planner cache metadata '{path}': {err}"))?;
+    if file_size > PLANNER_CACHE_DECODE_LIMIT_BYTES {
+        return Err(format!(
+            "Planner cache '{path}' is too large to load safely ({} bytes > {} bytes)",
+            file_size, PLANNER_CACHE_DECODE_LIMIT_BYTES
+        ));
+    }
+
     let file =
         File::open(path).map_err(|err| format!("Failed to open planner cache '{path}': {err}"))?;
     let mut reader = BufReader::new(file);

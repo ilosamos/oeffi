@@ -5,10 +5,25 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use gtfs_structures::GtfsReader;
 
+use crate::clustering::{ClusterStopAccessor, build_stop_clusters};
 use crate::snapshot::{
-    RouteEntry, SNAPSHOT_VERSION, Snapshot, SnapshotSummary, SourceFingerprint, StopEntry,
-    StopRecord,
+    RouteEntry, SNAPSHOT_VERSION, Snapshot, SnapshotSummary, SourceFingerprint, StopCluster,
+    StopEntry, StopRecord,
 };
+
+impl ClusterStopAccessor for StopRecord {
+    fn id(&self) -> &str {
+        &self.id
+    }
+
+    fn name(&self) -> &str {
+        &self.name
+    }
+
+    fn parent_station(&self) -> Option<&str> {
+        self.parent_station.as_deref()
+    }
+}
 
 fn now_unix_secs() -> u64 {
     SystemTime::now()
@@ -138,6 +153,11 @@ pub fn build_snapshot(source_path: &str) -> Result<Snapshot, String> {
 
     let mut stop_ids_by_name_upper: HashMap<String, Vec<String>> = HashMap::new();
     let mut stop_ids_by_code_upper: HashMap<String, Vec<String>> = HashMap::new();
+    let stop_idx_by_id: HashMap<String, u32> = stops
+        .iter()
+        .enumerate()
+        .map(|(idx, stop)| (stop.id.clone(), idx as u32))
+        .collect();
     for stop in &stops {
         stop_ids_by_name_upper
             .entry(stop.name.to_ascii_uppercase())
@@ -159,6 +179,31 @@ pub fn build_snapshot(source_path: &str) -> Result<Snapshot, String> {
     for stop_ids in stop_ids_by_code_upper.values_mut() {
         stop_ids.sort();
         stop_ids.dedup();
+    }
+
+    let clustered_stops = build_stop_clusters(&stops, &stop_idx_by_id);
+
+    let mut stop_clusters: Vec<StopCluster> = Vec::with_capacity(clustered_stops.clusters.len());
+    let mut stop_id_to_cluster_idx: HashMap<String, u32> = HashMap::new();
+
+    for (cluster_idx, cluster) in clustered_stops.clusters.iter().enumerate() {
+        let mut member_stop_ids: Vec<String> = cluster
+            .member_stop_idxs
+            .iter()
+            .filter_map(|stop_idx| stops.get(*stop_idx as usize).map(|stop| stop.id.clone()))
+            .collect();
+        member_stop_ids.sort();
+        member_stop_ids.dedup();
+
+        for stop_id in &member_stop_ids {
+            stop_id_to_cluster_idx.insert(stop_id.clone(), cluster_idx as u32);
+        }
+
+        stop_clusters.push(StopCluster {
+            key: cluster.key.clone(),
+            name: cluster.name.clone(),
+            member_stop_ids,
+        });
     }
 
     let mut route_stop_ids_by_name: HashMap<String, HashMap<String, HashSet<String>>> =
@@ -255,6 +300,10 @@ pub fn build_snapshot(source_path: &str) -> Result<Snapshot, String> {
         stops,
         stop_ids_by_name_upper,
         stop_ids_by_code_upper,
+        stop_clusters,
+        stop_cluster_idx_by_key: clustered_stops.cluster_idx_by_key,
+        stop_cluster_idxs_by_name_upper: clustered_stops.cluster_idxs_by_name_upper,
+        stop_id_to_cluster_idx,
         route_ids_by_stop_id,
     })
 }

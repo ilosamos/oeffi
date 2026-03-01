@@ -5,7 +5,7 @@ use strsim::jaro_winkler;
 use crate::build::build_snapshot;
 use crate::cache::{load_or_build_snapshot, save_snapshot};
 use crate::cli::DEFAULT_CACHE_PATH;
-use crate::snapshot::StopRecord;
+use crate::snapshot::{StopCluster, StopRecord};
 
 const STOP_FUZZY_THRESHOLD: f64 = 0.93;
 
@@ -201,25 +201,15 @@ fn route_labels_for_ids(
         .collect()
 }
 
-fn collect_route_ids_for_stop_with_children(
-    stop: &StopRecord,
-    children_by_parent: &HashMap<&str, Vec<&StopRecord>>,
+fn collect_route_ids_for_cluster(
+    cluster: &StopCluster,
     route_ids_by_stop_id: &HashMap<String, Vec<String>>,
 ) -> Vec<String> {
-    // Collect routes for a stop and merge routes from child platforms/quays.
-    let mut route_ids: HashSet<String> = route_ids_by_stop_id
-        .get(&stop.id)
-        .cloned()
-        .unwrap_or_default()
-        .into_iter()
-        .collect();
-
-    if let Some(children) = children_by_parent.get(stop.id.as_str()) {
-        for child in children {
-            if let Some(child_route_ids) = route_ids_by_stop_id.get(&child.id) {
-                for route_id in child_route_ids {
-                    route_ids.insert(route_id.clone());
-                }
+    let mut route_ids: HashSet<String> = HashSet::new();
+    for stop_id in &cluster.member_stop_ids {
+        if let Some(ids) = route_ids_by_stop_id.get(stop_id) {
+            for route_id in ids {
+                route_ids.insert(route_id.clone());
             }
         }
     }
@@ -239,77 +229,142 @@ pub fn cmd_stop_inspect(source_path: &str, query: &str) -> Result<(), String> {
         .map(|stop| (stop.id.as_str(), stop))
         .collect();
 
-    // Build parent -> children index once so station-level lookups can include platforms.
-    let mut children_by_parent: HashMap<&str, Vec<&StopRecord>> = HashMap::new();
-    for stop in &snapshot.stops {
-        if let Some(parent_id) = &stop.parent_station {
-            children_by_parent
-                .entry(parent_id.as_str())
-                .or_default()
-                .push(stop);
-        }
-    }
-
-    // Matching strategy (in order): exact id, exact code, exact name, fuzzy name.
+    // Matching strategy (in order): cluster key, exact stop id, exact code, exact cluster name,
+    // exact stop name, fuzzy cluster/stop name.
     let mut match_mode = "partial match (name/id/code)";
-    let mut matched_ids: Vec<String> = snapshot
-        .stops
-        .iter()
-        .filter(|stop| stop.id.eq_ignore_ascii_case(query))
-        .map(|stop| stop.id.clone())
-        .collect();
+    let mut matched_cluster_idxs: Vec<u32> = snapshot
+        .stop_cluster_idx_by_key
+        .get(query)
+        .copied()
+        .map(|idx| vec![idx])
+        .unwrap_or_default();
 
-    if matched_ids.is_empty() {
-        if let Some(ids) = snapshot.stop_ids_by_code_upper.get(&query_upper) {
-            match_mode = "exact stop code";
-            matched_ids = ids.clone();
+    if matched_cluster_idxs.is_empty() {
+        for (key, idx) in &snapshot.stop_cluster_idx_by_key {
+            if key.eq_ignore_ascii_case(query) {
+                matched_cluster_idxs = vec![*idx];
+                break;
+            }
+        }
+        if !matched_cluster_idxs.is_empty() {
+            match_mode = "exact cluster key";
         }
     } else {
-        match_mode = "exact stop id";
+        match_mode = "exact cluster key";
     }
 
-    if matched_ids.is_empty() {
-        if let Some(ids) = snapshot.stop_ids_by_name_upper.get(&query_upper) {
-            match_mode = "exact stop name";
-            matched_ids = ids.clone();
+    if matched_cluster_idxs.is_empty() {
+        let matched_ids: Vec<String> = snapshot
+            .stops
+            .iter()
+            .filter(|stop| stop.id.eq_ignore_ascii_case(query))
+            .map(|stop| stop.id.clone())
+            .collect();
+
+        if !matched_ids.is_empty() {
+            match_mode = "exact stop id";
+            matched_cluster_idxs = matched_ids
+                .into_iter()
+                .filter_map(|stop_id| snapshot.stop_id_to_cluster_idx.get(&stop_id).copied())
+                .collect();
         }
     }
 
-    if matched_ids.is_empty() {
-        // Fuzzy fallback only accepts high-confidence matches.
+    if matched_cluster_idxs.is_empty() {
+        if let Some(ids) = snapshot.stop_ids_by_code_upper.get(&query_upper) {
+            match_mode = "exact stop code";
+            matched_cluster_idxs = ids
+                .iter()
+                .filter_map(|stop_id| snapshot.stop_id_to_cluster_idx.get(stop_id).copied())
+                .collect();
+        }
+    }
+
+    if matched_cluster_idxs.is_empty() {
+        if let Some(idxs) = snapshot.stop_cluster_idxs_by_name_upper.get(&query_upper) {
+            match_mode = "exact stop/station name";
+            matched_cluster_idxs = idxs.clone();
+        }
+    }
+
+    if matched_cluster_idxs.is_empty() {
+        if let Some(ids) = snapshot.stop_ids_by_name_upper.get(&query_upper) {
+            match_mode = "exact stop name";
+            matched_cluster_idxs = ids
+                .iter()
+                .filter_map(|stop_id| snapshot.stop_id_to_cluster_idx.get(stop_id).copied())
+                .collect();
+        }
+    }
+
+    if matched_cluster_idxs.is_empty() {
         let mut best_name_upper: Option<&String> = None;
+        let mut best_score = 0.0f64;
+
+        for cluster_name_upper in snapshot.stop_cluster_idxs_by_name_upper.keys() {
+            let score = jaro_winkler(&query_upper, cluster_name_upper);
+            if score > best_score {
+                best_score = score;
+                best_name_upper = Some(cluster_name_upper);
+            }
+        }
+
+        if best_score >= STOP_FUZZY_THRESHOLD {
+            if let Some(name_upper) = best_name_upper {
+                matched_cluster_idxs = snapshot
+                    .stop_cluster_idxs_by_name_upper
+                    .get(name_upper)
+                    .cloned()
+                    .unwrap_or_default();
+                match_mode = "fuzzy stop/station name";
+            }
+        }
+    }
+
+    if matched_cluster_idxs.is_empty() {
+        // Fallback fuzzy on stop names if cluster names had no match.
+        let mut best_stop_name_upper: Option<&String> = None;
         let mut best_score = 0.0f64;
 
         for stop_name_upper in snapshot.stop_ids_by_name_upper.keys() {
             let score = jaro_winkler(&query_upper, stop_name_upper);
             if score > best_score {
                 best_score = score;
-                best_name_upper = Some(stop_name_upper);
+                best_stop_name_upper = Some(stop_name_upper);
             }
         }
 
         if best_score >= STOP_FUZZY_THRESHOLD {
-            if let Some(name_upper) = best_name_upper {
-                matched_ids = snapshot
+            if let Some(name_upper) = best_stop_name_upper {
+                matched_cluster_idxs = snapshot
                     .stop_ids_by_name_upper
                     .get(name_upper)
-                    .cloned()
-                    .unwrap_or_default();
+                    .into_iter()
+                    .flat_map(|ids| ids.iter())
+                    .filter_map(|stop_id| snapshot.stop_id_to_cluster_idx.get(stop_id).copied())
+                    .collect();
                 match_mode = "fuzzy stop name";
             }
         }
     }
 
-    if matched_ids.is_empty() {
+    if matched_cluster_idxs.is_empty() {
         // Final fallback: show a few human-friendly suggestions.
-        let query_upper = query.to_ascii_uppercase();
-
         let mut suggestions: Vec<String> = snapshot
-            .stops
+            .stop_clusters
             .iter()
-            .filter(|stop| stop.name.to_ascii_uppercase().starts_with(&query_upper))
-            .map(|stop| stop.name.clone())
+            .filter(|cluster| cluster.name.to_ascii_uppercase().starts_with(&query_upper))
+            .map(|cluster| cluster.name.clone())
             .collect();
+
+        if suggestions.is_empty() {
+            suggestions = snapshot
+                .stop_clusters
+                .iter()
+                .filter(|cluster| cluster.name.to_ascii_uppercase().contains(&query_upper))
+                .map(|cluster| cluster.name.clone())
+                .collect();
+        }
 
         if suggestions.is_empty() {
             suggestions = snapshot
@@ -331,32 +386,35 @@ pub fn cmd_stop_inspect(source_path: &str, query: &str) -> Result<(), String> {
         };
 
         return Err(format!(
-            "No stops found for query '{query}'.\nSearched fields: stop id, stop code, exact stop name, and high-confidence fuzzy stop name.\n{suggestion_text}\nExamples:\n  oeffi stop-inspect \"Karlsplatz\"\n  oeffi stop-inspect \"at:49:657:0:8\""
+            "No stops found for query '{query}'.\nSearched fields: cluster key, stop id, stop code, exact stop/station name, and high-confidence fuzzy stop/station name.\n{suggestion_text}\nExamples:\n  oeffi stop-inspect \"Karlsplatz\"\n  oeffi stop-inspect \"at:49:657:0:8\""
         ));
     }
 
-    matched_ids.sort();
-    matched_ids.dedup();
+    matched_cluster_idxs.sort();
+    matched_cluster_idxs.dedup();
 
-    // Rank matches by how many routes they expose (including child stops).
-    let mut ranked: Vec<(usize, String)> = matched_ids
+    // Rank matches by number of routes served at cluster level.
+    let mut ranked: Vec<(usize, u32)> = matched_cluster_idxs
         .into_iter()
-        .filter_map(|stop_id| {
-            stop_by_id.get(stop_id.as_str()).map(|stop| {
-                let route_count = collect_route_ids_for_stop_with_children(
-                    stop,
-                    &children_by_parent,
-                    &snapshot.route_ids_by_stop_id,
-                )
-                .len();
-                (route_count, stop_id)
-            })
+        .filter_map(|cluster_idx| {
+            snapshot
+                .stop_clusters
+                .get(cluster_idx as usize)
+                .map(|cluster| {
+                    let route_count =
+                        collect_route_ids_for_cluster(cluster, &snapshot.route_ids_by_stop_id)
+                            .len();
+                    (route_count, cluster_idx)
+                })
         })
         .collect();
 
     ranked.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.cmp(&b.1)));
 
-    let selected_stop_ids: Vec<String> = ranked.into_iter().map(|(_, stop_id)| stop_id).collect();
+    let selected_cluster_idxs: Vec<u32> = ranked
+        .into_iter()
+        .map(|(_, cluster_idx)| cluster_idx)
+        .collect();
 
     let route_by_id: HashMap<&str, &crate::snapshot::RouteEntry> = snapshot
         .routes
@@ -367,27 +425,39 @@ pub fn cmd_stop_inspect(source_path: &str, query: &str) -> Result<(), String> {
     println!("Stop inspect for '{query}' in {source_path} (via cache: {DEFAULT_CACHE_PATH})");
     println!("Match mode: {match_mode}");
 
-    // Print each matched stop with metadata and serving routes.
-    for stop_id in selected_stop_ids {
-        if let Some(stop) = stop_by_id.get(stop_id.as_str()) {
-            let route_ids = collect_route_ids_for_stop_with_children(
-                stop,
-                &children_by_parent,
-                &snapshot.route_ids_by_stop_id,
-            );
-            let route_labels = route_labels_for_ids(&route_ids, &route_by_id);
+    // Print each matched logical station cluster with platform details and serving routes.
+    for cluster_idx in selected_cluster_idxs {
+        let Some(cluster) = snapshot.stop_clusters.get(cluster_idx as usize) else {
+            continue;
+        };
 
-            println!();
-            println!("  Stop: {} ({})", stop.name, stop.id);
-            if let Some(code) = &stop.code {
-                println!("  Code: {code}");
-            }
-            if let Some(parent_station) = &stop.parent_station {
-                println!("  Parent station: {parent_station}");
-            }
-            println!("  Routes: {}", route_labels.len());
-            for label in route_labels {
-                println!("    - {label}");
+        let route_ids = collect_route_ids_for_cluster(cluster, &snapshot.route_ids_by_stop_id);
+        let route_labels = route_labels_for_ids(&route_ids, &route_by_id);
+
+        println!();
+        println!(
+            "  Station: {} ({} stop IDs)",
+            cluster.name,
+            cluster.member_stop_ids.len()
+        );
+        println!("  Cluster key: {}", cluster.key);
+        println!("  Routes: {}", route_labels.len());
+        for label in route_labels {
+            println!("    - {label}");
+        }
+
+        println!("  Platforms/stops:");
+        for stop_id in &cluster.member_stop_ids {
+            if let Some(stop) = stop_by_id.get(stop_id.as_str()) {
+                let code = stop.code.clone().unwrap_or_else(|| "-".to_string());
+                let parent = stop
+                    .parent_station
+                    .clone()
+                    .unwrap_or_else(|| "-".to_string());
+                println!(
+                    "    - {} | id={} | code={} | parent={}",
+                    stop.name, stop.id, code, parent
+                );
             }
         }
     }
