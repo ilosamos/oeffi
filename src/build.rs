@@ -7,6 +7,7 @@ use gtfs_structures::GtfsReader;
 
 use crate::snapshot::{
     RouteEntry, SNAPSHOT_VERSION, Snapshot, SnapshotSummary, SourceFingerprint, StopEntry,
+    StopRecord,
 };
 
 fn now_unix_secs() -> u64 {
@@ -123,9 +124,47 @@ pub fn build_snapshot(source_path: &str) -> Result<Snapshot, String> {
         route_ids.dedup();
     }
 
+    let mut stops: Vec<StopRecord> = gtfs
+        .stops
+        .values()
+        .map(|stop| StopRecord {
+            id: stop.id.clone(),
+            name: stop.name.clone().unwrap_or_else(|| "<unknown>".to_string()),
+            code: stop.code.clone(),
+            parent_station: stop.parent_station.clone(),
+        })
+        .collect();
+    stops.sort_by(|a, b| a.name.cmp(&b.name).then(a.id.cmp(&b.id)));
+
+    let mut stop_ids_by_name_upper: HashMap<String, Vec<String>> = HashMap::new();
+    let mut stop_ids_by_code_upper: HashMap<String, Vec<String>> = HashMap::new();
+    for stop in &stops {
+        stop_ids_by_name_upper
+            .entry(stop.name.to_ascii_uppercase())
+            .or_default()
+            .push(stop.id.clone());
+
+        if let Some(code) = &stop.code {
+            stop_ids_by_code_upper
+                .entry(code.to_ascii_uppercase())
+                .or_default()
+                .push(stop.id.clone());
+        }
+    }
+
+    for stop_ids in stop_ids_by_name_upper.values_mut() {
+        stop_ids.sort();
+        stop_ids.dedup();
+    }
+    for stop_ids in stop_ids_by_code_upper.values_mut() {
+        stop_ids.sort();
+        stop_ids.dedup();
+    }
+
     let mut route_stop_ids_by_name: HashMap<String, HashMap<String, HashSet<String>>> =
         HashMap::new();
     let mut representative_trip_names_by_route: HashMap<String, Vec<String>> = HashMap::new();
+    let mut route_ids_by_stop_id_set: HashMap<String, HashSet<String>> = HashMap::new();
 
     for trip in gtfs.trips.values() {
         let stop_ids_by_name = route_stop_ids_by_name
@@ -146,6 +185,11 @@ pub fn build_snapshot(source_path: &str) -> Result<Snapshot, String> {
                 .entry(stop_name.clone())
                 .or_default()
                 .insert(stop_time.stop.id.clone());
+
+            route_ids_by_stop_id_set
+                .entry(stop_time.stop.id.clone())
+                .or_default()
+                .insert(trip.route_id.clone());
 
             if seen_names.insert(stop_name.clone()) {
                 trip_names.push(stop_name);
@@ -193,6 +237,13 @@ pub fn build_snapshot(source_path: &str) -> Result<Snapshot, String> {
         route_stops_by_route_id.insert(route_id, mapped);
     }
 
+    let mut route_ids_by_stop_id: HashMap<String, Vec<String>> = HashMap::new();
+    for (stop_id, route_ids_set) in route_ids_by_stop_id_set {
+        let mut route_ids: Vec<String> = route_ids_set.into_iter().collect();
+        route_ids.sort();
+        route_ids_by_stop_id.insert(stop_id, route_ids);
+    }
+
     Ok(Snapshot {
         version: SNAPSHOT_VERSION,
         built_unix_secs: now_unix_secs(),
@@ -201,5 +252,9 @@ pub fn build_snapshot(source_path: &str) -> Result<Snapshot, String> {
         routes,
         route_ids_by_short_name_upper,
         route_stops_by_route_id,
+        stops,
+        stop_ids_by_name_upper,
+        stop_ids_by_code_upper,
+        route_ids_by_stop_id,
     })
 }

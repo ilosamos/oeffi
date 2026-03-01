@@ -2,7 +2,7 @@ use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
 
-pub const SNAPSHOT_VERSION: u32 = 2;
+pub const SNAPSHOT_VERSION: u32 = 3;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SnapshotSummary {
@@ -27,6 +27,14 @@ pub struct StopEntry {
     pub stop_ids_count: usize,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StopRecord {
+    pub id: String,
+    pub name: String,
+    pub code: Option<String>,
+    pub parent_station: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct SourceFingerprint {
     pub source_path: String,
@@ -44,4 +52,8 @@ pub struct Snapshot {
     pub routes: Vec<RouteEntry>,
     pub route_ids_by_short_name_upper: HashMap<String, Vec<String>>,
     pub route_stops_by_route_id: HashMap<String, Vec<StopEntry>>,
+    pub stops: Vec<StopRecord>,
+    pub stop_ids_by_name_upper: HashMap<String, Vec<String>>,
+    pub stop_ids_by_code_upper: HashMap<String, Vec<String>>,
+    pub route_ids_by_stop_id: HashMap<String, Vec<String>>,
 }

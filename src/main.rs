@@ -7,7 +7,7 @@ mod snapshot;
 use std::env;
 use std::process::ExitCode;
 
-use cli::{Command, USAGE, parse_command};
+use cli::{Command, DEFAULT_GTFS_PATH, USAGE, parse_command};
 
 fn run(command: Command) -> ExitCode {
     let result = match command {
@@ -15,13 +15,12 @@ fn run(command: Command) -> ExitCode {
             println!("hello world");
             Ok(())
         }
-        Command::GtfsSummary { source_path } => commands::cmd_gtfs_summary(&source_path),
-        Command::ListRoutes { source_path } => commands::cmd_list_routes(&source_path),
-        Command::RouteStops {
-            route,
-            source_path,
-            show_all,
-        } => commands::cmd_route_stops(&source_path, &route, show_all),
+        Command::GtfsSummary => commands::cmd_gtfs_summary(DEFAULT_GTFS_PATH),
+        Command::ListRoutes => commands::cmd_list_routes(DEFAULT_GTFS_PATH),
+        Command::RouteStops { route, show_all } => {
+            commands::cmd_route_stops(DEFAULT_GTFS_PATH, &route, show_all)
+        }
+        Command::StopInspect { query } => commands::cmd_stop_inspect(DEFAULT_GTFS_PATH, &query),
         Command::CacheBuild {
             source_path,
             cache_path,
@@ -35,8 +34,8 @@ fn run(command: Command) -> ExitCode {
     match result {
         Ok(()) => ExitCode::SUCCESS,
         Err(message) => {
-            eprintln!("Error: {message}\n");
-            eprintln!("{USAGE}");
+            eprintln!("Error: {message}");
+            eprintln!("Run `oeffi help` for usage.");
             ExitCode::from(2)
         }
     }
@@ -48,8 +47,8 @@ fn main() -> ExitCode {
     match parse_command(&args) {
         Ok(command) => run(command),
         Err(message) => {
-            eprintln!("Error: {message}\n");
-            eprintln!("{USAGE}");
+            eprintln!("Error: {message}");
+            eprintln!("Run `oeffi help` for usage.");
             ExitCode::from(2)
         }
     }
