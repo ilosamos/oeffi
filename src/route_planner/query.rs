@@ -70,8 +70,12 @@ pub fn build_leg_timings(
     journey: &Journey<u32, u32>,
     depart_secs: usize,
     min_transfer_between_legs_secs: usize,
+    active_trips: Option<&[bool]>,
 ) -> Result<Vec<LegTiming>, String> {
-    let timetable = PlannerTimetable { cache };
+    let timetable = PlannerTimetable {
+        cache,
+        active_trips,
+    };
     let mut out = Vec::new();
     let mut current_from = start_station_idx;
     let mut earliest_departure = depart_secs;
@@ -111,6 +115,7 @@ fn evaluate_journey_arrival_with_transfer_slack(
     start_station_idx: u32,
     journey: &Journey<u32, u32>,
     depart_secs: usize,
+    active_trips: Option<&[bool]>,
 ) -> Option<(usize, Vec<LegTiming>)> {
     let legs = build_leg_timings(
         cache,
@@ -118,6 +123,7 @@ fn evaluate_journey_arrival_with_transfer_slack(
         journey,
         depart_secs,
         MIN_TRANSFER_SECONDS,
+        active_trips,
     )
     .ok()?;
     let arrival = legs.last().map(|l| l.arrival).unwrap_or(depart_secs);
@@ -147,7 +153,11 @@ pub fn plan_route(
         ));
     }
 
-    let timetable = PlannerTimetable { cache };
+    let active_trips = cache.active_trip_mask_for_date(query_date);
+    let timetable = PlannerTimetable {
+        cache,
+        active_trips: Some(&active_trips),
+    };
     let mut best: Option<RouteOption> = None;
     let mut pair_stats: Vec<EvaluatedPair> = Vec::new();
     let mut all_options: Vec<RouteOption> = Vec::new();
@@ -173,6 +183,7 @@ pub fn plan_route(
                     *from_idx,
                     &journey,
                     depart_secs,
+                    Some(&active_trips),
                 ) else {
                     continue;
                 };
@@ -281,10 +292,15 @@ mod tests {
     use std::collections::HashMap;
     use std::path::Path;
 
+    use chrono::NaiveDate;
+    use raptor::Timetable;
+
     use crate::snapshot::SourceFingerprint;
 
     use super::*;
-    use crate::route_planner::model::{PlannerCache, PlannerRoute, PlannerStation, PlannerTrip};
+    use crate::route_planner::model::{
+        PlannerCache, PlannerRoute, PlannerServiceCalendar, PlannerStation, PlannerTrip,
+    };
 
     fn tiny_cache() -> PlannerCache {
         let stations = vec![
@@ -331,14 +347,17 @@ mod tests {
         let trips = vec![
             PlannerTrip {
                 route_idx: 0,
+                service_idx: 0,
                 times: vec![(36_000, 36_000), (36_300, 36_300)],
             },
             PlannerTrip {
                 route_idx: 1,
+                service_idx: 0,
                 times: vec![(36_300, 36_300), (36_600, 36_600)],
             },
             PlannerTrip {
                 route_idx: 1,
+                service_idx: 0,
                 times: vec![(36_420, 36_420), (36_720, 36_720)],
             },
         ];
@@ -373,6 +392,17 @@ mod tests {
             route_station_pos,
             trips,
             trip_idxs_by_route,
+            service_ids: vec!["svc".to_string()],
+            service_calendars: HashMap::from([(
+                0_u32,
+                PlannerServiceCalendar {
+                    weekday_mask: 0b111_1111,
+                    start_date_yyyymmdd: 20000101,
+                    end_date_yyyymmdd: 20991231,
+                },
+            )]),
+            services_added_by_date: HashMap::new(),
+            services_removed_by_date: HashMap::new(),
             routes_serving_station,
             footpaths: HashMap::from([
                 (0_u32, vec![0_u32]),
@@ -395,11 +425,51 @@ mod tests {
             arrival: 36_600,
         };
 
-        let legs = build_leg_timings(&cache, 0, &journey, 35_900, 120).expect("legs");
+        let legs = build_leg_timings(&cache, 0, &journey, 35_900, 120, None).expect("legs");
         assert_eq!(legs.len(), 2);
         // second leg should board at 10:07, not 10:05.
         assert_eq!(legs[1].departure, 36_420);
         assert_eq!(legs[1].arrival, 36_720);
+    }
+
+    #[test]
+    fn timetable_skips_inactive_trips() {
+        let cache = tiny_cache();
+        let active = vec![true, false, true];
+        let timetable = PlannerTimetable {
+            cache: &cache,
+            active_trips: Some(&active),
+        };
+
+        // Route 1 at station B should pick trip 2 (10:07), since trip 1 (10:05) is inactive.
+        assert_eq!(timetable.get_earliest_trip(1, 36_300, 1), Some(2));
+    }
+
+    #[test]
+    fn active_services_apply_calendar_dates_overrides() {
+        let mut cache = tiny_cache();
+        cache.service_ids = vec!["svc".to_string()];
+        cache.service_calendars = HashMap::from([(
+            0_u32,
+            PlannerServiceCalendar {
+                // Monday only
+                weekday_mask: 0b000_0001,
+                start_date_yyyymmdd: 20260101,
+                end_date_yyyymmdd: 20261231,
+            },
+        )]);
+        // 2026-01-05 is Monday; remove service there.
+        cache.services_removed_by_date = HashMap::from([(20260105_i32, vec![0_u32])]);
+        // 2026-01-06 is Tuesday; add service there.
+        cache.services_added_by_date = HashMap::from([(20260106_i32, vec![0_u32])]);
+
+        let monday = NaiveDate::from_ymd_opt(2026, 1, 5).expect("valid date");
+        let tuesday = NaiveDate::from_ymd_opt(2026, 1, 6).expect("valid date");
+        let monday_active = cache.active_services_on(monday);
+        let tuesday_active = cache.active_services_on(tuesday);
+
+        assert_eq!(monday_active, vec![false]);
+        assert_eq!(tuesday_active, vec![true]);
     }
 
     #[test]

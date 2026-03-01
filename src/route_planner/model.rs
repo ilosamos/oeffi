@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 
+use chrono::{Datelike, NaiveDate, Weekday};
 use serde::{Deserialize, Serialize};
 
 use crate::snapshot::SourceFingerprint;
@@ -9,7 +10,7 @@ pub const MAX_TRANSFERS: usize = 6;
 pub const MIN_TRANSFER_SECONDS: usize = 150;
 pub const DEFAULT_TRANSFER_SECONDS: usize = 300;
 pub const PLANNER_CACHE_PATH: &str = "planner.cache.bin";
-pub const PLANNER_CACHE_VERSION: u32 = 1;
+pub const PLANNER_CACHE_VERSION: u32 = 2;
 pub const PLANNER_CACHE_DECODE_LIMIT_BYTES: u64 = 1024 * 1024 * 1024;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -38,7 +39,15 @@ pub struct PlannerRoute {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PlannerTrip {
     pub route_idx: u32,
+    pub service_idx: u32,
     pub times: Vec<(usize, usize)>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PlannerServiceCalendar {
+    pub weekday_mask: u8,
+    pub start_date_yyyymmdd: i32,
+    pub end_date_yyyymmdd: i32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -55,12 +64,32 @@ pub struct PlannerCache {
     pub route_station_pos: Vec<HashMap<u32, usize>>,
     pub trips: Vec<PlannerTrip>,
     pub trip_idxs_by_route: Vec<Vec<u32>>,
+    pub service_ids: Vec<String>,
+    pub service_calendars: HashMap<u32, PlannerServiceCalendar>,
+    pub services_added_by_date: HashMap<i32, Vec<u32>>,
+    pub services_removed_by_date: HashMap<i32, Vec<u32>>,
     pub routes_serving_station: HashMap<u32, Vec<u32>>,
     pub footpaths: HashMap<u32, Vec<u32>>,
     pub transfer_times: HashMap<(u32, u32), usize>,
 }
 
 impl PlannerCache {
+    fn weekday_bit(weekday: Weekday) -> u8 {
+        match weekday {
+            Weekday::Mon => 1 << 0,
+            Weekday::Tue => 1 << 1,
+            Weekday::Wed => 1 << 2,
+            Weekday::Thu => 1 << 3,
+            Weekday::Fri => 1 << 4,
+            Weekday::Sat => 1 << 5,
+            Weekday::Sun => 1 << 6,
+        }
+    }
+
+    fn date_to_yyyymmdd(date: NaiveDate) -> i32 {
+        date.year() * 10_000 + date.month() as i32 * 100 + date.day() as i32
+    }
+
     pub fn stations_count(&self) -> usize {
         self.stations.len()
     }
@@ -71,6 +100,47 @@ impl PlannerCache {
 
     pub fn trips_count(&self) -> usize {
         self.trips.len()
+    }
+
+    pub fn active_services_on(&self, date: NaiveDate) -> Vec<bool> {
+        let mut active = vec![false; self.service_ids.len()];
+        let date_key = Self::date_to_yyyymmdd(date);
+        let weekday_bit = Self::weekday_bit(date.weekday());
+
+        for (service_idx, cal) in &self.service_calendars {
+            if date_key >= cal.start_date_yyyymmdd
+                && date_key <= cal.end_date_yyyymmdd
+                && (cal.weekday_mask & weekday_bit) != 0
+            {
+                active[*service_idx as usize] = true;
+            }
+        }
+
+        if let Some(removed) = self.services_removed_by_date.get(&date_key) {
+            for service_idx in removed {
+                active[*service_idx as usize] = false;
+            }
+        }
+        if let Some(added) = self.services_added_by_date.get(&date_key) {
+            for service_idx in added {
+                active[*service_idx as usize] = true;
+            }
+        }
+
+        active
+    }
+
+    pub fn active_trip_mask_for_date(&self, date: NaiveDate) -> Vec<bool> {
+        let active_services = self.active_services_on(date);
+        self.trips
+            .iter()
+            .map(|trip| {
+                active_services
+                    .get(trip.service_idx as usize)
+                    .copied()
+                    .unwrap_or(false)
+            })
+            .collect()
     }
 }
 

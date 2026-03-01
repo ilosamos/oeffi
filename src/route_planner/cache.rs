@@ -4,7 +4,8 @@ use std::io::{BufReader, BufWriter};
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use gtfs_structures::{GtfsReader, TransferType};
+use chrono::Datelike;
+use gtfs_structures::{Exception, GtfsReader, TransferType};
 
 use crate::build::compute_source_fingerprint;
 use crate::cache_meta::fingerprint_is_fresh;
@@ -12,8 +13,8 @@ use crate::clustering::{ClusterStopAccessor, build_stop_clusters};
 
 use super::model::{
     DEFAULT_TRANSFER_SECONDS, MIN_TRANSFER_SECONDS, PLANNER_CACHE_DECODE_LIMIT_BYTES,
-    PLANNER_CACHE_PATH, PLANNER_CACHE_VERSION, PlannerCache, PlannerRoute, PlannerStation,
-    PlannerStop, PlannerTrip,
+    PLANNER_CACHE_PATH, PLANNER_CACHE_VERSION, PlannerCache, PlannerRoute, PlannerServiceCalendar,
+    PlannerStation, PlannerStop, PlannerTrip,
 };
 
 impl ClusterStopAccessor for PlannerStop {
@@ -112,12 +113,104 @@ pub(crate) fn build_planner_cache(source_path: &str) -> Result<PlannerCache, Str
     let station_idx_by_key = clustered_stops.cluster_idx_by_key;
     let station_idxs_by_name_upper = clustered_stops.cluster_idxs_by_name_upper;
 
+    let mut service_ids: Vec<String> = Vec::new();
+    let mut service_idx_by_id: HashMap<String, u32> = HashMap::new();
+    let mut ensure_service_idx = |service_id: &str| -> u32 {
+        if let Some(idx) = service_idx_by_id.get(service_id).copied() {
+            return idx;
+        }
+        let idx = service_ids.len() as u32;
+        service_ids.push(service_id.to_string());
+        service_idx_by_id.insert(service_id.to_string(), idx);
+        idx
+    };
+
+    for calendar in gtfs.calendar.values() {
+        ensure_service_idx(&calendar.id);
+    }
+    for service_id in gtfs.calendar_dates.keys() {
+        ensure_service_idx(service_id);
+    }
+
+    let mut service_calendars: HashMap<u32, PlannerServiceCalendar> = HashMap::new();
+    for calendar in gtfs.calendar.values() {
+        let service_idx = ensure_service_idx(&calendar.id);
+        let mut weekday_mask = 0u8;
+        if calendar.monday {
+            weekday_mask |= 1 << 0;
+        }
+        if calendar.tuesday {
+            weekday_mask |= 1 << 1;
+        }
+        if calendar.wednesday {
+            weekday_mask |= 1 << 2;
+        }
+        if calendar.thursday {
+            weekday_mask |= 1 << 3;
+        }
+        if calendar.friday {
+            weekday_mask |= 1 << 4;
+        }
+        if calendar.saturday {
+            weekday_mask |= 1 << 5;
+        }
+        if calendar.sunday {
+            weekday_mask |= 1 << 6;
+        }
+
+        let start_date_yyyymmdd = calendar.start_date.year() * 10_000
+            + calendar.start_date.month() as i32 * 100
+            + calendar.start_date.day() as i32;
+        let end_date_yyyymmdd = calendar.end_date.year() * 10_000
+            + calendar.end_date.month() as i32 * 100
+            + calendar.end_date.day() as i32;
+
+        service_calendars.insert(
+            service_idx,
+            PlannerServiceCalendar {
+                weekday_mask,
+                start_date_yyyymmdd,
+                end_date_yyyymmdd,
+            },
+        );
+    }
+
+    let mut services_added_by_date: HashMap<i32, Vec<u32>> = HashMap::new();
+    let mut services_removed_by_date: HashMap<i32, Vec<u32>> = HashMap::new();
+    for calendar_dates in gtfs.calendar_dates.values() {
+        for calendar_date in calendar_dates {
+            let service_idx = ensure_service_idx(&calendar_date.service_id);
+            let date_key = calendar_date.date.year() * 10_000
+                + calendar_date.date.month() as i32 * 100
+                + calendar_date.date.day() as i32;
+            match calendar_date.exception_type {
+                Exception::Added => services_added_by_date
+                    .entry(date_key)
+                    .or_default()
+                    .push(service_idx),
+                Exception::Deleted => services_removed_by_date
+                    .entry(date_key)
+                    .or_default()
+                    .push(service_idx),
+            }
+        }
+    }
+    for service_idxs in services_added_by_date.values_mut() {
+        service_idxs.sort();
+        service_idxs.dedup();
+    }
+    for service_idxs in services_removed_by_date.values_mut() {
+        service_idxs.sort();
+        service_idxs.dedup();
+    }
+
     let mut route_variant_idx: HashMap<(String, Vec<u32>), u32> = HashMap::new();
     let mut routes: Vec<PlannerRoute> = Vec::new();
     let mut trips: Vec<PlannerTrip> = Vec::new();
     let mut trip_idxs_by_route: Vec<Vec<u32>> = Vec::new();
 
     for trip in gtfs.trips.values() {
+        let service_idx = ensure_service_idx(&trip.service_id);
         let mut station_pattern: Vec<u32> = Vec::new();
         let mut times: Vec<(usize, usize)> = Vec::new();
 
@@ -182,7 +275,11 @@ pub(crate) fn build_planner_cache(source_path: &str) -> Result<PlannerCache, Str
         };
 
         let trip_idx = trips.len() as u32;
-        trips.push(PlannerTrip { route_idx, times });
+        trips.push(PlannerTrip {
+            route_idx,
+            service_idx,
+            times,
+        });
         trip_idxs_by_route[route_idx as usize].push(trip_idx);
     }
 
@@ -285,6 +382,10 @@ pub(crate) fn build_planner_cache(source_path: &str) -> Result<PlannerCache, Str
         route_station_pos,
         trips,
         trip_idxs_by_route,
+        service_ids,
+        service_calendars,
+        services_added_by_date,
+        services_removed_by_date,
         routes_serving_station,
         footpaths,
         transfer_times,

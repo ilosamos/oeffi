@@ -6,6 +6,7 @@ use super::model::{DEFAULT_TRANSFER_SECONDS, PlannerCache};
 
 pub struct PlannerTimetable<'a> {
     pub cache: &'a PlannerCache,
+    pub active_trips: Option<&'a [bool]>,
 }
 
 impl<'a> Timetable for PlannerTimetable<'a> {
@@ -65,6 +66,15 @@ impl<'a> Timetable for PlannerTimetable<'a> {
             .iter()
             .copied()
             .filter(|trip_idx| {
+                if let Some(active_trips) = self.active_trips {
+                    if !active_trips
+                        .get(*trip_idx as usize)
+                        .copied()
+                        .unwrap_or(false)
+                    {
+                        return false;
+                    }
+                }
                 let trip = &self.cache.trips[*trip_idx as usize];
                 trip.times[stop_pos].1 >= at
             })

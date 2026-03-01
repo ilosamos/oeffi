@@ -157,7 +157,7 @@ pub fn print_route_plan(cache: &PlannerCache, result: &RoutePlanResult, debug: b
         return;
     }
 
-    println!("\nItinerary (RAPTOR plan):");
+    println!("\nItinerary:");
     let chosen = RouteOption {
         from_idx: result.chosen_from_idx,
         to_idx: result.chosen_to_idx,

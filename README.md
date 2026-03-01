@@ -14,6 +14,9 @@ CLI for inspecting Wiener Linien GTFS data and planning routes.
 - `oeffi route-plan <from> <to> [--debug] [--alts N]`
 - `oeffi cache-build [gtfs_path] [cache_file]`
 
+Notes:
+- `route-plan` now applies `calendar.txt` + `calendar_dates.txt` for the current service day.
+
 ## Cache Files
 - `gtfs.cache.bin`: snapshot cache for inspect/list commands.
 - `planner.cache.bin`: planner cache with station-normalized RAPTOR model.

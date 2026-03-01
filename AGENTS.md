@@ -5,6 +5,7 @@
 - Uses two cache files built from `data/` GTFS text files:
   - `gtfs.cache.bin` for snapshot/inspect commands
   - `planner.cache.bin` for route planning
+- Route planning cache includes service-day activation data from `calendar.txt` and `calendar_dates.txt`.
 - Main commands: `gtfs-summary`, `routes`, `route-stops`, `stop-inspect`, `route-plan`, `cache-build`.
 
 ## Quick File Tree

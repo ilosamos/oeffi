@@ -1,7 +1,7 @@
 pub const DEFAULT_GTFS_PATH: &str = "data";
 pub const DEFAULT_CACHE_PATH: &str = "gtfs.cache.bin";
 
-pub const USAGE: &str = r#"oeffi - Wiener Linien GTFS inspector
+pub const USAGE: &str = r#"oeffi - Wiener Linien CLI
 
 Usage:
   oeffi <command>
