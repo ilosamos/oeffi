@@ -123,11 +123,17 @@ pub fn build_snapshot(source_path: &str) -> Result<Snapshot, String> {
         route_ids.dedup();
     }
 
-    let mut route_stop_acc: HashMap<String, HashMap<String, (u32, HashSet<String>)>> =
+    let mut route_stop_ids_by_name: HashMap<String, HashMap<String, HashSet<String>>> =
         HashMap::new();
+    let mut representative_trip_names_by_route: HashMap<String, Vec<String>> = HashMap::new();
 
     for trip in gtfs.trips.values() {
-        let stop_map = route_stop_acc.entry(trip.route_id.clone()).or_default();
+        let stop_ids_by_name = route_stop_ids_by_name
+            .entry(trip.route_id.clone())
+            .or_default();
+
+        let mut trip_names: Vec<String> = Vec::new();
+        let mut seen_names: HashSet<String> = HashSet::new();
 
         for stop_time in &trip.stop_times {
             let stop_name = stop_time
@@ -136,33 +142,51 @@ pub fn build_snapshot(source_path: &str) -> Result<Snapshot, String> {
                 .clone()
                 .unwrap_or_else(|| format!("<unknown stop {}>", stop_time.stop.id));
 
-            let seq = stop_time.stop_sequence;
-            let entry = stop_map
-                .entry(stop_name)
-                .or_insert_with(|| (seq, HashSet::new()));
+            stop_ids_by_name
+                .entry(stop_name.clone())
+                .or_default()
+                .insert(stop_time.stop.id.clone());
 
-            if seq < entry.0 {
-                entry.0 = seq;
+            if seen_names.insert(stop_name.clone()) {
+                trip_names.push(stop_name);
             }
-            entry.1.insert(stop_time.stop.id.clone());
         }
+
+        representative_trip_names_by_route
+            .entry(trip.route_id.clone())
+            .and_modify(|existing| {
+                if trip_names.len() > existing.len() {
+                    *existing = trip_names.clone();
+                }
+            })
+            .or_insert(trip_names);
     }
 
     let mut route_stops_by_route_id: HashMap<String, Vec<StopEntry>> = HashMap::new();
 
-    for (route_id, stop_map) in route_stop_acc {
-        let mut stops: Vec<(u32, String, usize)> = stop_map
-            .into_iter()
-            .map(|(name, (seq, stop_ids))| (seq, name, stop_ids.len()))
+    for (route_id, stop_ids_by_name) in route_stop_ids_by_name {
+        let mut ordered_names = representative_trip_names_by_route
+            .get(&route_id)
+            .cloned()
+            .unwrap_or_default();
+
+        let ordered_set: HashSet<String> = ordered_names.iter().cloned().collect();
+        let mut missing: Vec<String> = stop_ids_by_name
+            .keys()
+            .filter(|name| !ordered_set.contains(*name))
+            .cloned()
             .collect();
+        missing.sort();
+        ordered_names.extend(missing);
 
-        stops.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(&b.1)));
-
-        let mapped: Vec<StopEntry> = stops
+        let mapped: Vec<StopEntry> = ordered_names
             .into_iter()
-            .map(|(_, name, stop_ids_count)| StopEntry {
+            .map(|name| StopEntry {
+                stop_ids_count: stop_ids_by_name
+                    .get(&name)
+                    .map(|ids| ids.len())
+                    .unwrap_or(0),
                 name,
-                stop_ids_count,
             })
             .collect();
 

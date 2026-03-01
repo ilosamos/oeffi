@@ -10,7 +10,7 @@ Commands:
   hello                                       Print "hello world"
   gtfs-summary [gtfs_path]                    Show high-level GTFS dataset stats
   routes [gtfs_path]                          List all routes (id, short name, long name)
-  route-stops <route> [gtfs_path]             List unique stops for a route short name/id (example: U1)
+  route-stops <route> [gtfs_path] [--all]     List stops in order for a route (default: longest variant only)
   cache-build [gtfs_path] [cache_file]        Build binary cache file (default: gtfs.cache.bin)
   help                                        Show this help message
 
@@ -20,6 +20,7 @@ Options:
 Examples:
   oeffi cache-build
   oeffi route-stops U1
+  oeffi route-stops U1 --all
   oeffi routes
 "#;
 
@@ -35,6 +36,7 @@ pub enum Command {
     RouteStops {
         route: String,
         source_path: String,
+        show_all: bool,
     },
     CacheBuild {
         source_path: String,
@@ -75,14 +77,37 @@ pub fn parse_command(args: &[String]) -> Result<Command, String> {
         "routes" if args.len() == 2 => Ok(Command::ListRoutes {
             source_path: args[1].clone(),
         }),
-        "route-stops" if args.len() == 2 => Ok(Command::RouteStops {
-            route: args[1].clone(),
-            source_path: default_path(),
-        }),
-        "route-stops" if args.len() == 3 => Ok(Command::RouteStops {
-            route: args[1].clone(),
-            source_path: args[2].clone(),
-        }),
+        "route-stops" => {
+            if args.len() < 2 || args.len() > 4 {
+                return Err(
+                    "Invalid arguments for 'route-stops'. Usage: oeffi route-stops <route> [gtfs_path] [--all]"
+                        .to_string(),
+                );
+            }
+
+            let route = args[1].clone();
+            let mut source_path = default_path();
+            let mut show_all = false;
+
+            for arg in args.iter().skip(2) {
+                if arg == "--all" || arg == "-a" {
+                    show_all = true;
+                } else if source_path == DEFAULT_GTFS_PATH {
+                    source_path = arg.clone();
+                } else {
+                    return Err(
+                        "Invalid arguments for 'route-stops'. Usage: oeffi route-stops <route> [gtfs_path] [--all]"
+                            .to_string(),
+                    );
+                }
+            }
+
+            Ok(Command::RouteStops {
+                route,
+                source_path,
+                show_all,
+            })
+        }
         "cache-build" if args.len() == 1 => Ok(Command::CacheBuild {
             source_path: default_path(),
             cache_path: default_cache_path(),
@@ -95,10 +120,6 @@ pub fn parse_command(args: &[String]) -> Result<Command, String> {
             source_path: args[1].clone(),
             cache_path: args[2].clone(),
         }),
-        "route-stops" => Err(
-            "Invalid arguments for 'route-stops'. Usage: oeffi route-stops <route> [gtfs_path]"
-                .to_string(),
-        ),
         "cache-build" => Err(
             "Invalid arguments for 'cache-build'. Usage: oeffi cache-build [gtfs_path] [cache_file]"
                 .to_string(),
@@ -134,7 +155,20 @@ mod tests {
         let args = vec!["route-stops".to_string(), "U1".to_string()];
         assert!(matches!(
             parse_command(&args),
-            Ok(Command::RouteStops { route, source_path }) if route == "U1" && source_path == DEFAULT_GTFS_PATH
+            Ok(Command::RouteStops { route, source_path, show_all }) if route == "U1" && source_path == DEFAULT_GTFS_PATH && !show_all
+        ));
+    }
+
+    #[test]
+    fn parses_route_stops_all_flag() {
+        let args = vec![
+            "route-stops".to_string(),
+            "U1".to_string(),
+            "--all".to_string(),
+        ];
+        assert!(matches!(
+            parse_command(&args),
+            Ok(Command::RouteStops { route, source_path, show_all }) if route == "U1" && source_path == DEFAULT_GTFS_PATH && show_all
         ));
     }
 

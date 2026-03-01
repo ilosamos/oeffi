@@ -17,9 +17,11 @@ fn run(command: Command) -> ExitCode {
         }
         Command::GtfsSummary { source_path } => commands::cmd_gtfs_summary(&source_path),
         Command::ListRoutes { source_path } => commands::cmd_list_routes(&source_path),
-        Command::RouteStops { route, source_path } => {
-            commands::cmd_route_stops(&source_path, &route)
-        }
+        Command::RouteStops {
+            route,
+            source_path,
+            show_all,
+        } => commands::cmd_route_stops(&source_path, &route, show_all),
         Command::CacheBuild {
             source_path,
             cache_path,
