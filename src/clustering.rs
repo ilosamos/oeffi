@@ -12,7 +12,6 @@ pub struct ClusteredStops {
     pub clusters: Vec<StopClusterDef>,
     pub cluster_idx_by_key: HashMap<String, u32>,
     pub cluster_idxs_by_name_upper: HashMap<String, Vec<u32>>,
-    pub stop_idx_to_cluster_idx: Vec<u32>,
 }
 
 pub trait ClusterStopAccessor {
@@ -55,7 +54,6 @@ pub fn build_stop_clusters<T: ClusterStopAccessor>(
 
     let mut clusters: Vec<StopClusterDef> = Vec::new();
     let mut cluster_idx_by_key: HashMap<String, u32> = HashMap::new();
-    let mut stop_idx_to_cluster_idx: Vec<u32> = vec![0; stops.len()];
 
     for (stop_idx, stop) in stops.iter().enumerate() {
         let cluster_key = stop_cluster_key(
@@ -91,7 +89,6 @@ pub fn build_stop_clusters<T: ClusterStopAccessor>(
         clusters[cluster_idx as usize]
             .member_stop_idxs
             .push(stop_idx as u32);
-        stop_idx_to_cluster_idx[stop_idx] = cluster_idx;
     }
 
     for cluster in &mut clusters {
@@ -111,6 +108,5 @@ pub fn build_stop_clusters<T: ClusterStopAccessor>(
         clusters,
         cluster_idx_by_key,
         cluster_idxs_by_name_upper,
-        stop_idx_to_cluster_idx,
     }
 }

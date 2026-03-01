@@ -2,31 +2,37 @@ use std::collections::{HashMap, HashSet};
 
 use strsim::jaro_winkler;
 
-use crate::cache::{load_or_build_app_cache, rebuild_app_cache};
+use crate::build::build_snapshot;
+use crate::cache::{load_or_build_snapshot, save_snapshot};
 use crate::cli::DEFAULT_CACHE_PATH;
+use crate::route_planner::rebuild_planner_cache;
 use crate::snapshot::{StopCluster, StopRecord};
 
 const STOP_FUZZY_THRESHOLD: f64 = 0.93;
 
 pub fn cmd_cache_build(source_path: &str, cache_path: &str) -> Result<(), String> {
-    // Always rebuild the unified cache from source GTFS files.
-    let cache = rebuild_app_cache(source_path, cache_path)?;
-    let snapshot = &cache.snapshot;
+    // Always rebuild both caches from source GTFS files.
+    let snapshot = build_snapshot(source_path)?;
+    save_snapshot(cache_path, &snapshot)?;
+    let planner = rebuild_planner_cache(source_path)?;
 
-    println!("Built cache: {cache_path}");
+    println!("Built snapshot cache: {cache_path}");
     println!("  source: {}", snapshot.fingerprint.source_path);
     println!("  files: {}", snapshot.fingerprint.file_count);
     println!("  size: {} bytes", snapshot.fingerprint.total_size_bytes);
     println!("  routes: {}", snapshot.summary.routes);
     println!("  trips: {}", snapshot.summary.trips);
+    println!("Built planner cache: planner.cache.bin");
+    println!("  stations: {}", planner.stations_count());
+    println!("  routes: {}", planner.routes_count());
+    println!("  trips: {}", planner.trips_count());
 
     Ok(())
 }
 
 pub fn cmd_gtfs_summary(source_path: &str) -> Result<(), String> {
     // Reuse cache when possible, otherwise build it once transparently.
-    let cache = load_or_build_app_cache(source_path, DEFAULT_CACHE_PATH)?;
-    let snapshot = &cache.snapshot;
+    let snapshot = load_or_build_snapshot(source_path, DEFAULT_CACHE_PATH)?;
 
     println!("GTFS summary for {source_path} (via cache: {DEFAULT_CACHE_PATH})");
     println!("  agencies: {}", snapshot.summary.agencies);
@@ -41,8 +47,7 @@ pub fn cmd_gtfs_summary(source_path: &str) -> Result<(), String> {
 
 pub fn cmd_list_routes(source_path: &str) -> Result<(), String> {
     // Load snapshot and print a compact route table.
-    let cache = load_or_build_app_cache(source_path, DEFAULT_CACHE_PATH)?;
-    let snapshot = &cache.snapshot;
+    let snapshot = load_or_build_snapshot(source_path, DEFAULT_CACHE_PATH)?;
 
     println!(
         "Routes in {source_path} ({} total, via cache: {DEFAULT_CACHE_PATH}):",
@@ -60,8 +65,7 @@ pub fn cmd_list_routes(source_path: &str) -> Result<(), String> {
 }
 
 pub fn cmd_route_stops(source_path: &str, route_name: &str, show_all: bool) -> Result<(), String> {
-    let cache = load_or_build_app_cache(source_path, DEFAULT_CACHE_PATH)?;
-    let snapshot = &cache.snapshot;
+    let snapshot = load_or_build_snapshot(source_path, DEFAULT_CACHE_PATH)?;
 
     // Accept either route short name (e.g. "U1") or explicit route id.
     let query_upper = route_name.to_ascii_uppercase();
@@ -222,8 +226,7 @@ fn collect_route_ids_for_cluster(
 }
 
 pub fn cmd_stop_inspect(source_path: &str, query: &str) -> Result<(), String> {
-    let cache = load_or_build_app_cache(source_path, DEFAULT_CACHE_PATH)?;
-    let snapshot = &cache.snapshot;
+    let snapshot = load_or_build_snapshot(source_path, DEFAULT_CACHE_PATH)?;
     let query_upper = query.to_ascii_uppercase();
 
     let stop_by_id: HashMap<&str, &StopRecord> = snapshot

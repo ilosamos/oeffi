@@ -1,6 +1,10 @@
 use std::borrow::Cow;
 use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};
+use std::fs::File;
+use std::io::{BufReader, BufWriter};
+use std::path::Path;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use chrono::{Local, Timelike};
 use gtfs_structures::{GtfsReader, TransferType};
@@ -8,17 +12,21 @@ use raptor::{Journey, Timetable};
 use serde::{Deserialize, Serialize};
 use strsim::jaro_winkler;
 
-use crate::cache::load_or_build_app_cache;
-use crate::cli::{DEFAULT_CACHE_PATH, DEFAULT_GTFS_PATH};
+use crate::build::compute_source_fingerprint;
+use crate::cli::DEFAULT_GTFS_PATH;
 use crate::clustering::{ClusterStopAccessor, build_stop_clusters};
+use crate::snapshot::SourceFingerprint;
 
 const STOP_FUZZY_THRESHOLD: f64 = 0.94;
 const MAX_TRANSFERS: usize = 6;
-const SAME_STATION_WALK_SECONDS: usize = 120;
+const SAME_STATION_TRANSFER_SECONDS: usize = 120;
 const DEFAULT_TRANSFER_SECONDS: usize = 300;
+const PLANNER_CACHE_PATH: &str = "planner.cache.bin";
+const PLANNER_CACHE_VERSION: u32 = 1;
+const PLANNER_CACHE_DECODE_LIMIT_BYTES: u64 = 1024 * 1024 * 1024;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub(crate) struct PlannerStop {
+struct PlannerStop {
     id: String,
     name: String,
     code: Option<String>,
@@ -40,43 +48,57 @@ impl ClusterStopAccessor for PlannerStop {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub(crate) struct PlannerRoute {
-    base_route_id: String,
-    short_name: String,
-    long_name: String,
-    stops: Vec<u32>,
+struct PlannerStation {
+    key: String,
+    name: String,
+    member_stop_ids: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub(crate) struct PlannerTrip {
+struct PlannerRoute {
+    base_route_id: String,
+    short_name: String,
+    long_name: String,
+    stations: Vec<u32>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct PlannerTrip {
     route_idx: u32,
     times: Vec<(usize, usize)>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub(crate) struct PlannerCluster {
-    key: String,
-    name: String,
-    member_stop_idxs: Vec<u32>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct PlannerCache {
-    stops: Vec<PlannerStop>,
-    stop_idx_by_id: HashMap<String, u32>,
-    stop_idxs_by_name_upper: HashMap<String, Vec<u32>>,
-    stop_idxs_by_code_upper: HashMap<String, Vec<u32>>,
-    clusters: Vec<PlannerCluster>,
-    cluster_idx_by_key: HashMap<String, u32>,
-    cluster_idxs_by_name_upper: HashMap<String, Vec<u32>>,
-    stop_idx_to_cluster_idx: Vec<u32>,
+    version: u32,
+    built_unix_secs: u64,
+    fingerprint: SourceFingerprint,
+    stations: Vec<PlannerStation>,
+    station_idx_by_key: HashMap<String, u32>,
+    station_idxs_by_name_upper: HashMap<String, Vec<u32>>,
+    station_idx_by_stop_id: HashMap<String, u32>,
+    station_idxs_by_code_upper: HashMap<String, Vec<u32>>,
     routes: Vec<PlannerRoute>,
-    route_stop_pos: Vec<HashMap<u32, usize>>,
+    route_station_pos: Vec<HashMap<u32, usize>>,
     trips: Vec<PlannerTrip>,
     trip_idxs_by_route: Vec<Vec<u32>>,
-    routes_serving_stop: HashMap<u32, Vec<u32>>,
+    routes_serving_station: HashMap<u32, Vec<u32>>,
     footpaths: HashMap<u32, Vec<u32>>,
     transfer_times: HashMap<(u32, u32), usize>,
+}
+
+impl PlannerCache {
+    pub fn stations_count(&self) -> usize {
+        self.stations.len()
+    }
+
+    pub fn routes_count(&self) -> usize {
+        self.routes.len()
+    }
+
+    pub fn trips_count(&self) -> usize {
+        self.trips.len()
+    }
 }
 
 struct PlannerTimetable<'a> {
@@ -91,7 +113,7 @@ impl<'a> Timetable for PlannerTimetable<'a> {
     fn get_routes_serving_stop(&self, stop: Self::Stop) -> Cow<'_, [Self::Route]> {
         Cow::Owned(
             self.cache
-                .routes_serving_stop
+                .routes_serving_station
                 .get(&stop)
                 .cloned()
                 .unwrap_or_default(),
@@ -105,11 +127,11 @@ impl<'a> Timetable for PlannerTimetable<'a> {
         right: Self::Stop,
     ) -> Self::Stop {
         let route_idx = route as usize;
-        let left_pos = self.cache.route_stop_pos[route_idx]
+        let left_pos = self.cache.route_station_pos[route_idx]
             .get(&left)
             .copied()
             .unwrap_or(usize::MAX);
-        let right_pos = self.cache.route_stop_pos[route_idx]
+        let right_pos = self.cache.route_station_pos[route_idx]
             .get(&right)
             .copied()
             .unwrap_or(usize::MAX);
@@ -118,11 +140,11 @@ impl<'a> Timetable for PlannerTimetable<'a> {
 
     fn get_stops_after(&self, route: Self::Route, stop: Self::Stop) -> Cow<'_, [Self::Stop]> {
         let route_idx = route as usize;
-        let pos = self.cache.route_stop_pos[route_idx]
+        let pos = self.cache.route_station_pos[route_idx]
             .get(&stop)
             .copied()
             .unwrap_or(0);
-        Cow::Owned(self.cache.routes[route_idx].stops[pos..].to_vec())
+        Cow::Owned(self.cache.routes[route_idx].stations[pos..].to_vec())
     }
 
     fn get_earliest_trip(
@@ -132,7 +154,9 @@ impl<'a> Timetable for PlannerTimetable<'a> {
         stop: Self::Stop,
     ) -> Option<Self::Trip> {
         let route_idx = route as usize;
-        let stop_pos = self.cache.route_stop_pos[route_idx].get(&stop).copied()?;
+        let stop_pos = self.cache.route_station_pos[route_idx]
+            .get(&stop)
+            .copied()?;
 
         self.cache.trip_idxs_by_route[route_idx]
             .iter()
@@ -150,14 +174,14 @@ impl<'a> Timetable for PlannerTimetable<'a> {
     fn get_arrival_time(&self, trip: Self::Trip, stop: Self::Stop) -> raptor::Tau {
         let trip_idx = trip as usize;
         let route_idx = self.cache.trips[trip_idx].route_idx as usize;
-        let stop_pos = self.cache.route_stop_pos[route_idx][&stop];
+        let stop_pos = self.cache.route_station_pos[route_idx][&stop];
         self.cache.trips[trip_idx].times[stop_pos].0
     }
 
     fn get_departure_time(&self, trip: Self::Trip, stop: Self::Stop) -> raptor::Tau {
         let trip_idx = trip as usize;
         let route_idx = self.cache.trips[trip_idx].route_idx as usize;
-        let stop_pos = self.cache.route_stop_pos[route_idx][&stop];
+        let stop_pos = self.cache.route_station_pos[route_idx][&stop];
         self.cache.trips[trip_idx].times[stop_pos].1
     }
 
@@ -174,6 +198,13 @@ impl<'a> Timetable for PlannerTimetable<'a> {
     }
 }
 
+fn now_unix_secs() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
 fn format_secs_hhmm(secs: usize) -> String {
     let days = secs / 86_400;
     let rem = secs % 86_400;
@@ -186,12 +217,22 @@ fn format_secs_hhmm(secs: usize) -> String {
     }
 }
 
+fn format_delta_secs(secs: usize) -> String {
+    let m = secs / 60;
+    let s = secs % 60;
+    if m > 0 {
+        format!("{m}m {s:02}s")
+    } else {
+        format!("{s}s")
+    }
+}
+
 pub(crate) fn build_planner_cache(source_path: &str) -> Result<PlannerCache, String> {
     let gtfs = GtfsReader::default()
         .read_shapes(false)
         .trim_fields(false)
         .read(source_path)
-        .map_err(|err| format!("Failed to load GTFS from '{}': {err}", source_path))?;
+        .map_err(|err| format!("Failed to load GTFS from '{source_path}': {err}"))?;
 
     let mut stop_ids: Vec<String> = gtfs.stops.keys().cloned().collect();
     stop_ids.sort();
@@ -215,51 +256,66 @@ pub(crate) fn build_planner_cache(source_path: &str) -> Result<PlannerCache, Str
         });
     }
 
-    let mut stop_idxs_by_name_upper: HashMap<String, Vec<u32>> = HashMap::new();
-    let mut stop_idxs_by_code_upper: HashMap<String, Vec<u32>> = HashMap::new();
-    for (idx, stop) in stops.iter().enumerate() {
-        let idx_u32 = idx as u32;
-        stop_idxs_by_name_upper
-            .entry(stop.name.to_ascii_uppercase())
-            .or_default()
-            .push(idx_u32);
-        if let Some(code) = &stop.code {
-            stop_idxs_by_code_upper
-                .entry(code.to_ascii_uppercase())
-                .or_default()
-                .push(idx_u32);
+    let clustered_stops = build_stop_clusters(&stops, &stop_idx_by_id);
+    let mut stations: Vec<PlannerStation> = Vec::with_capacity(clustered_stops.clusters.len());
+    let mut station_idx_by_stop_idx: Vec<u32> = vec![0; stops.len()];
+    let mut station_idx_by_stop_id: HashMap<String, u32> = HashMap::new();
+    let mut station_idxs_by_code_upper: HashMap<String, Vec<u32>> = HashMap::new();
+
+    for (station_idx, cluster) in clustered_stops.clusters.iter().enumerate() {
+        let mut member_stop_ids: Vec<String> = cluster
+            .member_stop_idxs
+            .iter()
+            .filter_map(|idx| stops.get(*idx as usize).map(|s| s.id.clone()))
+            .collect();
+        member_stop_ids.sort();
+        member_stop_ids.dedup();
+
+        let station_idx_u32 = station_idx as u32;
+        for stop_idx in &cluster.member_stop_idxs {
+            station_idx_by_stop_idx[*stop_idx as usize] = station_idx_u32;
         }
+        for stop_id in &member_stop_ids {
+            station_idx_by_stop_id.insert(stop_id.clone(), station_idx_u32);
+        }
+        for stop_idx in &cluster.member_stop_idxs {
+            if let Some(code) = stops[*stop_idx as usize].code.as_ref() {
+                station_idxs_by_code_upper
+                    .entry(code.to_ascii_uppercase())
+                    .or_default()
+                    .push(station_idx_u32);
+            }
+        }
+
+        stations.push(PlannerStation {
+            key: cluster.key.clone(),
+            name: cluster.name.clone(),
+            member_stop_ids,
+        });
     }
 
-    let clustered_stops = build_stop_clusters(&stops, &stop_idx_by_id);
-    let clusters: Vec<PlannerCluster> = clustered_stops
-        .clusters
-        .into_iter()
-        .map(|cluster| PlannerCluster {
-            key: cluster.key,
-            name: cluster.name,
-            member_stop_idxs: cluster.member_stop_idxs,
-        })
-        .collect();
-    let cluster_idx_by_key = clustered_stops.cluster_idx_by_key;
-    let cluster_idxs_by_name_upper = clustered_stops.cluster_idxs_by_name_upper;
-    let stop_idx_to_cluster_idx = clustered_stops.stop_idx_to_cluster_idx;
+    for station_idxs in station_idxs_by_code_upper.values_mut() {
+        station_idxs.sort();
+        station_idxs.dedup();
+    }
 
-    // Route variants are keyed by base route id + exact stop pattern.
+    let station_idx_by_key = clustered_stops.cluster_idx_by_key;
+    let station_idxs_by_name_upper = clustered_stops.cluster_idxs_by_name_upper;
+
     let mut route_variant_idx: HashMap<(String, Vec<u32>), u32> = HashMap::new();
     let mut routes: Vec<PlannerRoute> = Vec::new();
     let mut trips: Vec<PlannerTrip> = Vec::new();
     let mut trip_idxs_by_route: Vec<Vec<u32>> = Vec::new();
 
     for trip in gtfs.trips.values() {
-        let mut stop_pattern: Vec<u32> = Vec::new();
+        let mut station_pattern: Vec<u32> = Vec::new();
         let mut times: Vec<(usize, usize)> = Vec::new();
 
         for st in &trip.stop_times {
             let arr = st.arrival_time.or(st.departure_time);
             let dep = st.departure_time.or(st.arrival_time);
             let (Some(arr), Some(dep)) = (arr, dep) else {
-                stop_pattern.clear();
+                station_pattern.clear();
                 times.clear();
                 break;
             };
@@ -267,16 +323,29 @@ pub(crate) fn build_planner_cache(source_path: &str) -> Result<PlannerCache, Str
             let Some(stop_idx) = stop_idx_by_id.get(&st.stop.id).copied() else {
                 continue;
             };
+            let station_idx = station_idx_by_stop_idx[stop_idx as usize];
+            let arr = arr as usize;
+            let dep = dep as usize;
 
-            stop_pattern.push(stop_idx);
-            times.push((arr as usize, dep as usize));
+            if let Some(last_station) = station_pattern.last().copied() {
+                if last_station == station_idx {
+                    if let Some(last_times) = times.last_mut() {
+                        last_times.0 = last_times.0.min(arr);
+                        last_times.1 = last_times.1.max(dep);
+                    }
+                    continue;
+                }
+            }
+
+            station_pattern.push(station_idx);
+            times.push((arr, dep));
         }
 
-        if stop_pattern.len() < 2 || stop_pattern.len() != times.len() {
+        if station_pattern.len() < 2 || station_pattern.len() != times.len() {
             continue;
         }
 
-        let route_key = (trip.route_id.clone(), stop_pattern.clone());
+        let route_key = (trip.route_id.clone(), station_pattern.clone());
         let route_idx = if let Some(existing) = route_variant_idx.get(&route_key).copied() {
             existing
         } else {
@@ -284,7 +353,6 @@ pub(crate) fn build_planner_cache(source_path: &str) -> Result<PlannerCache, Str
                 .routes
                 .get(&trip.route_id)
                 .ok_or_else(|| format!("Route '{}' not found in GTFS", trip.route_id))?;
-
             let idx = routes.len() as u32;
             route_variant_idx.insert(route_key, idx);
             routes.push(PlannerRoute {
@@ -297,7 +365,7 @@ pub(crate) fn build_planner_cache(source_path: &str) -> Result<PlannerCache, Str
                     .long_name
                     .clone()
                     .unwrap_or_else(|| "-".to_string()),
-                stops: stop_pattern,
+                stations: station_pattern,
             });
             trip_idxs_by_route.push(Vec::new());
             idx
@@ -308,39 +376,37 @@ pub(crate) fn build_planner_cache(source_path: &str) -> Result<PlannerCache, Str
         trip_idxs_by_route[route_idx as usize].push(trip_idx);
     }
 
-    // Sort trips per route by first departure for faster earliest-trip scanning.
-    for (route_idx, trip_idxs) in trip_idxs_by_route.iter_mut().enumerate() {
-        let _ = route_idx;
+    for trip_idxs in &mut trip_idxs_by_route {
         trip_idxs.sort_by_key(|trip_idx| {
             let trip = &trips[*trip_idx as usize];
             trip.times.first().map(|t| t.1).unwrap_or(usize::MAX)
         });
     }
 
-    let mut route_stop_pos: Vec<HashMap<u32, usize>> = Vec::with_capacity(routes.len());
-    let mut routes_serving_stop: HashMap<u32, Vec<u32>> = HashMap::new();
+    let mut route_station_pos: Vec<HashMap<u32, usize>> = Vec::with_capacity(routes.len());
+    let mut routes_serving_station: HashMap<u32, Vec<u32>> = HashMap::new();
 
     for (route_idx, route) in routes.iter().enumerate() {
         let route_idx_u32 = route_idx as u32;
         let mut pos_map: HashMap<u32, usize> = HashMap::new();
-        for (pos, stop_idx) in route.stops.iter().copied().enumerate() {
-            pos_map.entry(stop_idx).or_insert(pos);
+        for (pos, station_idx) in route.stations.iter().copied().enumerate() {
+            pos_map.entry(station_idx).or_insert(pos);
         }
 
-        let mut seen: HashSet<u32> = HashSet::new();
-        for stop_idx in &route.stops {
-            if seen.insert(*stop_idx) {
-                routes_serving_stop
-                    .entry(*stop_idx)
+        let mut seen = HashSet::new();
+        for station_idx in &route.stations {
+            if seen.insert(*station_idx) {
+                routes_serving_station
+                    .entry(*station_idx)
                     .or_default()
                     .push(route_idx_u32);
             }
         }
 
-        route_stop_pos.push(pos_map);
+        route_station_pos.push(pos_map);
     }
 
-    for route_idxs in routes_serving_stop.values_mut() {
+    for route_idxs in routes_serving_station.values_mut() {
         route_idxs.sort();
         route_idxs.dedup();
     }
@@ -348,45 +414,48 @@ pub(crate) fn build_planner_cache(source_path: &str) -> Result<PlannerCache, Str
     let mut footpaths: HashMap<u32, Vec<u32>> = HashMap::new();
     let mut transfer_times: HashMap<(u32, u32), usize> = HashMap::new();
 
-    // Explicit GTFS transfers.
+    // Explicit GTFS transfers mapped stop->station.
     for stop in gtfs.stops.values() {
-        let Some(from_idx) = stop_idx_by_id.get(&stop.id).copied() else {
+        let Some(from_stop_idx) = stop_idx_by_id.get(&stop.id).copied() else {
             continue;
         };
+        let from_station_idx = station_idx_by_stop_idx[from_stop_idx as usize];
         for tr in &stop.transfers {
             if tr.transfer_type == TransferType::Impossible {
                 continue;
             }
-            let Some(to_idx) = stop_idx_by_id.get(&tr.to_stop_id).copied() else {
+            let Some(to_stop_idx) = stop_idx_by_id.get(&tr.to_stop_id).copied() else {
                 continue;
             };
-            footpaths.entry(from_idx).or_default().push(to_idx);
-            transfer_times.insert(
-                (from_idx, to_idx),
-                tr.min_transfer_time
-                    .map(|v| v as usize)
-                    .unwrap_or(DEFAULT_TRANSFER_SECONDS),
-            );
+            let to_station_idx = station_idx_by_stop_idx[to_stop_idx as usize];
+            if from_station_idx == to_station_idx {
+                continue;
+            }
+            let secs = tr
+                .min_transfer_time
+                .map(|v| v as usize)
+                .unwrap_or(DEFAULT_TRANSFER_SECONDS);
+            footpaths
+                .entry(from_station_idx)
+                .or_default()
+                .push(to_station_idx);
+            transfer_times
+                .entry((from_station_idx, to_station_idx))
+                .and_modify(|cur| {
+                    if secs < *cur {
+                        *cur = secs;
+                    }
+                })
+                .or_insert(secs);
         }
     }
 
-    // Parent <-> child station links as fallback walk edges.
-    for stop in &stops {
-        let Some(from_idx) = stop_idx_by_id.get(&stop.id).copied() else {
-            continue;
-        };
-        if let Some(parent_id) = &stop.parent_station {
-            if let Some(parent_idx) = stop_idx_by_id.get(parent_id).copied() {
-                footpaths.entry(from_idx).or_default().push(parent_idx);
-                footpaths.entry(parent_idx).or_default().push(from_idx);
-                transfer_times
-                    .entry((from_idx, parent_idx))
-                    .or_insert(SAME_STATION_WALK_SECONDS);
-                transfer_times
-                    .entry((parent_idx, from_idx))
-                    .or_insert(SAME_STATION_WALK_SECONDS);
-            }
-        }
+    // Keep station interchange possible by adding self-footpath.
+    for station_idx in 0..stations.len() as u32 {
+        footpaths.entry(station_idx).or_default().push(station_idx);
+        transfer_times
+            .entry((station_idx, station_idx))
+            .or_insert(SAME_STATION_TRANSFER_SECONDS);
     }
 
     for tos in footpaths.values_mut() {
@@ -394,112 +463,115 @@ pub(crate) fn build_planner_cache(source_path: &str) -> Result<PlannerCache, Str
         tos.dedup();
     }
 
+    let fingerprint = compute_source_fingerprint(source_path)?;
     Ok(PlannerCache {
-        stops,
-        stop_idx_by_id,
-        stop_idxs_by_name_upper,
-        stop_idxs_by_code_upper,
-        clusters,
-        cluster_idx_by_key,
-        cluster_idxs_by_name_upper,
-        stop_idx_to_cluster_idx,
+        version: PLANNER_CACHE_VERSION,
+        built_unix_secs: now_unix_secs(),
+        fingerprint,
+        stations,
+        station_idx_by_key,
+        station_idxs_by_name_upper,
+        station_idx_by_stop_id,
+        station_idxs_by_code_upper,
         routes,
-        route_stop_pos,
+        route_station_pos,
         trips,
         trip_idxs_by_route,
-        routes_serving_stop,
+        routes_serving_station,
         footpaths,
         transfer_times,
     })
 }
 
-fn match_stop_idxs(cache: &PlannerCache, query: &str) -> Vec<u32> {
-    let query_upper = query.to_ascii_uppercase();
-
-    if let Some(idx) = cache.stop_idx_by_id.get(query).copied() {
-        return vec![idx];
-    }
-    for (id, idx) in &cache.stop_idx_by_id {
-        if id.eq_ignore_ascii_case(query) {
-            return vec![*idx];
-        }
-    }
-
-    if let Some(v) = cache.stop_idxs_by_code_upper.get(&query_upper) {
-        return v.clone();
-    }
-
-    if let Some(v) = cache.stop_idxs_by_name_upper.get(&query_upper) {
-        return v.clone();
-    }
-
-    let mut best_name_upper: Option<String> = None;
-    let mut best_score = 0.0;
-    for name_upper in cache.stop_idxs_by_name_upper.keys() {
-        let score = jaro_winkler(&query_upper, name_upper);
-        if score > best_score {
-            best_score = score;
-            best_name_upper = Some(name_upper.clone());
-        }
-    }
-
-    if best_score >= STOP_FUZZY_THRESHOLD {
-        if let Some(name) = best_name_upper {
-            return cache
-                .stop_idxs_by_name_upper
-                .get(&name)
-                .cloned()
-                .unwrap_or_default();
-        }
-    }
-
-    Vec::new()
+fn save_planner_cache(path: &str, cache: &PlannerCache) -> Result<(), String> {
+    let file = File::create(path)
+        .map_err(|err| format!("Failed to create planner cache '{path}': {err}"))?;
+    let mut writer = BufWriter::new(file);
+    bincode::serialize_into(&mut writer, cache)
+        .map_err(|err| format!("Failed to serialize planner cache '{path}': {err}"))
 }
 
-fn stop_idxs_to_cluster_idxs(cache: &PlannerCache, stop_idxs: &[u32]) -> Vec<u32> {
-    let mut clusters: Vec<u32> = stop_idxs
-        .iter()
-        .filter_map(|idx| cache.stop_idx_to_cluster_idx.get(*idx as usize).copied())
-        .collect();
-    clusters.sort();
-    clusters.dedup();
-    clusters
+fn load_planner_cache(path: &str) -> Result<PlannerCache, String> {
+    let file_size = std::fs::metadata(Path::new(path))
+        .map(|m| m.len())
+        .map_err(|err| format!("Failed to read planner cache metadata '{path}': {err}"))?;
+    if file_size > PLANNER_CACHE_DECODE_LIMIT_BYTES {
+        return Err(format!(
+            "Planner cache '{path}' is too large to load safely ({} bytes > {} bytes)",
+            file_size, PLANNER_CACHE_DECODE_LIMIT_BYTES
+        ));
+    }
+
+    let file =
+        File::open(path).map_err(|err| format!("Failed to open planner cache '{path}': {err}"))?;
+    let mut reader = BufReader::new(file);
+    bincode::deserialize_from(&mut reader)
+        .map_err(|err| format!("Failed to deserialize planner cache '{path}': {err}"))
 }
 
-fn match_cluster_idxs(cache: &PlannerCache, query: &str) -> Vec<u32> {
-    if let Some(idx) = cache.cluster_idx_by_key.get(query).copied() {
+fn planner_cache_fresh(cache: &PlannerCache, source_path: &str) -> Result<bool, String> {
+    if cache.version != PLANNER_CACHE_VERSION {
+        return Ok(false);
+    }
+    let current = compute_source_fingerprint(source_path)?;
+    Ok(cache.fingerprint == current)
+}
+
+fn load_or_build_planner_cache(source_path: &str) -> Result<PlannerCache, String> {
+    if let Ok(cache) = load_planner_cache(PLANNER_CACHE_PATH) {
+        if planner_cache_fresh(&cache, source_path)? {
+            return Ok(cache);
+        }
+    }
+    rebuild_planner_cache(source_path)
+}
+
+pub fn rebuild_planner_cache(source_path: &str) -> Result<PlannerCache, String> {
+    let cache = build_planner_cache(source_path)?;
+    save_planner_cache(PLANNER_CACHE_PATH, &cache)?;
+    Ok(cache)
+}
+
+fn match_station_idxs(cache: &PlannerCache, query: &str) -> Vec<u32> {
+    if let Some(idx) = cache.station_idx_by_key.get(query).copied() {
         return vec![idx];
     }
-    for (key, idx) in &cache.cluster_idx_by_key {
+    for (key, idx) in &cache.station_idx_by_key {
         if key.eq_ignore_ascii_case(query) {
             return vec![*idx];
         }
     }
 
-    let query_upper = query.to_ascii_uppercase();
-    if let Some(v) = cache.cluster_idxs_by_name_upper.get(&query_upper) {
-        return v.clone();
+    if let Some(idx) = cache.station_idx_by_stop_id.get(query).copied() {
+        return vec![idx];
+    }
+    for (stop_id, idx) in &cache.station_idx_by_stop_id {
+        if stop_id.eq_ignore_ascii_case(query) {
+            return vec![*idx];
+        }
     }
 
-    let from_stop_match = match_stop_idxs(cache, query);
-    if !from_stop_match.is_empty() {
-        return stop_idxs_to_cluster_idxs(cache, &from_stop_match);
+    let query_upper = query.to_ascii_uppercase();
+    if let Some(v) = cache.station_idxs_by_code_upper.get(&query_upper) {
+        return v.clone();
+    }
+    if let Some(v) = cache.station_idxs_by_name_upper.get(&query_upper) {
+        return v.clone();
     }
 
     let mut best_name_upper: Option<String> = None;
     let mut best_score = 0.0;
-    for name_upper in cache.cluster_idxs_by_name_upper.keys() {
+    for name_upper in cache.station_idxs_by_name_upper.keys() {
         let score = jaro_winkler(&query_upper, name_upper);
         if score > best_score {
             best_score = score;
             best_name_upper = Some(name_upper.clone());
         }
     }
-
     if best_score >= STOP_FUZZY_THRESHOLD {
         if let Some(name) = best_name_upper {
             return cache
-                .cluster_idxs_by_name_upper
+                .station_idxs_by_name_upper
                 .get(&name)
                 .cloned()
                 .unwrap_or_default();
@@ -509,29 +581,13 @@ fn match_cluster_idxs(cache: &PlannerCache, query: &str) -> Vec<u32> {
     Vec::new()
 }
 
-fn cluster_stop_idxs(cache: &PlannerCache, cluster_idxs: &[u32]) -> Vec<u32> {
-    let mut out: Vec<u32> = cluster_idxs
-        .iter()
-        .flat_map(|cluster_idx| {
-            cache.clusters[*cluster_idx as usize]
-                .member_stop_idxs
-                .iter()
-                .copied()
-        })
-        .collect();
-    out.sort();
-    out.dedup();
-    out
-}
-
-fn stop_label(cache: &PlannerCache, stop_idx: u32) -> String {
-    let stop = &cache.stops[stop_idx as usize];
-    format!("{} ({})", stop.name, stop.id)
-}
-
-fn cluster_label(cache: &PlannerCache, cluster_idx: u32) -> String {
-    let c = &cache.clusters[cluster_idx as usize];
-    format!("{} ({} stop IDs)", c.name, c.member_stop_idxs.len())
+fn station_label(cache: &PlannerCache, station_idx: u32) -> String {
+    let station = &cache.stations[station_idx as usize];
+    format!(
+        "{} ({} stop IDs)",
+        station.name,
+        station.member_stop_ids.len()
+    )
 }
 
 fn better_journey(candidate: &Journey<u32, u32>, current_best: &Journey<u32, u32>) -> bool {
@@ -542,29 +598,19 @@ fn better_journey(candidate: &Journey<u32, u32>, current_best: &Journey<u32, u32
     }
 }
 
-fn format_delta_secs(secs: usize) -> String {
-    let m = secs / 60;
-    let s = secs % 60;
-    if m > 0 {
-        format!("{m}m {s:02}s")
-    } else {
-        format!("{s}s")
-    }
-}
-
-fn print_journey(cache: &PlannerCache, start_stop_idx: u32, journey: &Journey<u32, u32>) {
-    let mut current_from = start_stop_idx;
-    for (idx, (route_idx, drop_stop_idx)) in journey.plan.iter().enumerate() {
+fn print_journey(cache: &PlannerCache, start_station_idx: u32, journey: &Journey<u32, u32>) {
+    let mut current_from = start_station_idx;
+    for (idx, (route_idx, drop_station_idx)) in journey.plan.iter().enumerate() {
         let route = &cache.routes[*route_idx as usize];
         println!(
             "  {}. Ride {} [{}] {} -> {}",
             idx + 1,
             route.short_name,
             route.base_route_id,
-            stop_label(cache, current_from),
-            stop_label(cache, *drop_stop_idx)
+            station_label(cache, current_from),
+            station_label(cache, *drop_station_idx)
         );
-        current_from = *drop_stop_idx;
+        current_from = *drop_station_idx;
     }
 }
 
@@ -593,33 +639,28 @@ pub fn cmd_route_plan(
     let query_date = now.date_naive();
     let depart_secs = now.time().num_seconds_from_midnight() as usize;
 
-    let app_cache = load_or_build_app_cache(DEFAULT_GTFS_PATH, DEFAULT_CACHE_PATH)?;
-    let cache = &app_cache.planner;
+    let cache = load_or_build_planner_cache(DEFAULT_GTFS_PATH)?;
 
-    let from_cluster_idxs = match_cluster_idxs(&cache, from_query);
-    if from_cluster_idxs.is_empty() {
+    let from_station_idxs = match_station_idxs(&cache, from_query);
+    if from_station_idxs.is_empty() {
         return Err(format!(
             "No origin stop match for '{from_query}'. Use stop id or a close stop name."
         ));
     }
-
-    let to_cluster_idxs = match_cluster_idxs(&cache, to_query);
-    if to_cluster_idxs.is_empty() {
+    let to_station_idxs = match_station_idxs(&cache, to_query);
+    if to_station_idxs.is_empty() {
         return Err(format!(
             "No destination stop match for '{to_query}'. Use stop id or a close stop name."
         ));
     }
-    let from_idxs = cluster_stop_idxs(&cache, &from_cluster_idxs);
-    let to_idxs = cluster_stop_idxs(&cache, &to_cluster_idxs);
 
     let timetable = PlannerTimetable { cache: &cache };
-
     let mut best: Option<(u32, u32, Journey<u32, u32>)> = None;
     let mut pair_stats: Vec<EvaluatedPair> = Vec::new();
     let mut candidates: Vec<CandidateJourney> = Vec::new();
 
-    for from_idx in &from_idxs {
-        for to_idx in &to_idxs {
+    for from_idx in &from_station_idxs {
+        for to_idx in &to_station_idxs {
             let journeys = timetable.raptor(MAX_TRANSFERS, depart_secs, *from_idx, *to_idx);
             if journeys.is_empty() {
                 if debug {
@@ -647,7 +688,6 @@ pub fn cmd_route_plan(
                     pareto_count: journeys.len(),
                     best_journey: Some(local_best.clone()),
                 });
-
                 for journey in journeys {
                     candidates.push(CandidateJourney {
                         from_idx: *from_idx,
@@ -673,7 +713,7 @@ pub fn cmd_route_plan(
             let unreachable = pair_stats.iter().filter(|p| p.pareto_count == 0).count();
             println!("Route plan debug: '{from_query}' -> '{to_query}'");
             println!(
-                "  evaluated stop pairs: {} | reachable: {} | unreachable: {}",
+                "  evaluated station pairs: {} | reachable: {} | unreachable: {}",
                 pair_stats.len(),
                 reachable,
                 unreachable
@@ -689,29 +729,27 @@ pub fn cmd_route_plan(
     println!("Service day: {query_date}");
     println!("Departure (query time): {}", format_secs_hhmm(depart_secs));
     println!("Arrival: {}", format_secs_hhmm(best_journey.arrival));
-    println!(
-        "Walking model: GTFS transfers + parent/child station links (OSM walking not configured)"
-    );
+    println!("Model: station-normalized planning (hybrid stop->station cache)");
 
-    println!("\nMatched origin clusters:");
-    for cluster_idx in &from_cluster_idxs {
-        println!("  - {}", cluster_label(&cache, *cluster_idx));
+    println!("\nMatched origin stations:");
+    for station_idx in &from_station_idxs {
+        println!("  - {}", station_label(&cache, *station_idx));
     }
-    println!("Matched destination clusters:");
-    for cluster_idx in &to_cluster_idxs {
-        println!("  - {}", cluster_label(&cache, *cluster_idx));
+    println!("Matched destination stations:");
+    for station_idx in &to_station_idxs {
+        println!("  - {}", station_label(&cache, *station_idx));
     }
 
-    println!("\nChosen stop pair:");
-    println!("  from: {}", stop_label(&cache, best_from));
-    println!("  to:   {}", stop_label(&cache, best_to));
+    println!("\nChosen station pair:");
+    println!("  from: {}", station_label(&cache, best_from));
+    println!("  to:   {}", station_label(&cache, best_to));
 
     if debug {
         let reachable = pair_stats.iter().filter(|p| p.pareto_count > 0).count();
         let unreachable = pair_stats.iter().filter(|p| p.pareto_count == 0).count();
         println!("\nDebug summary:");
         println!(
-            "  evaluated stop pairs: {} | reachable: {} | unreachable: {}",
+            "  evaluated station pairs: {} | reachable: {} | unreachable: {}",
             pair_stats.len(),
             reachable,
             unreachable
@@ -731,13 +769,13 @@ pub fn cmd_route_plan(
         });
 
         if !best_pairs.is_empty() {
-            println!("  top reachable stop pairs:");
+            println!("  top reachable station pairs:");
             for pair in best_pairs.into_iter().take(5) {
                 let j = pair.best_journey.as_ref().expect("exists");
                 println!(
                     "    - {} -> {} | arrival {} | legs {} | pareto {}",
-                    stop_label(cache, pair.from_idx),
-                    stop_label(cache, pair.to_idx),
+                    station_label(&cache, pair.from_idx),
+                    station_label(&cache, pair.to_idx),
                     format_secs_hhmm(j.arrival),
                     j.plan.len(),
                     pair.pareto_count
@@ -747,12 +785,12 @@ pub fn cmd_route_plan(
     }
 
     if best_journey.plan.is_empty() {
-        println!("\nNo transit legs needed (already at destination cluster).\n");
+        println!("\nNo transit legs needed (already at destination station).\n");
         return Ok(());
     }
 
     println!("\nItinerary (RAPTOR plan):");
-    print_journey(cache, best_from, &best_journey);
+    print_journey(&cache, best_from, &best_journey);
 
     if debug && !candidates.is_empty() {
         candidates.sort_by(|a, b| {
@@ -784,16 +822,15 @@ pub fn cmd_route_plan(
             );
             println!(
                 "    pair: {} -> {}",
-                stop_label(cache, alt.from_idx),
-                stop_label(cache, alt.to_idx)
+                station_label(&cache, alt.from_idx),
+                station_label(&cache, alt.to_idx)
             );
-            print_journey(cache, alt.from_idx, &alt.journey);
+            print_journey(&cache, alt.from_idx, &alt.journey);
 
             if shown >= alternatives {
                 break;
             }
         }
-
         if shown == 0 {
             println!("  (No additional alternatives found.)");
         }
