@@ -1,7 +1,9 @@
-pub const DEFAULT_GTFS_PATH: &str = "data";
+use chrono::NaiveDate;
+
+pub const DEFAULT_GTFS_PATH: &str = "data/combined-vienna";
 pub const DEFAULT_CACHE_PATH: &str = "gtfs.cache.bin";
 
-pub const USAGE: &str = r#"oeffi - Wiener Linien CLI
+pub const USAGE: &str = r#"oeffi - Wien Öffi CLI
 
 Usage:
   oeffi <command>
@@ -9,7 +11,8 @@ Usage:
 Commands:
   gtfs-summary                                Show high-level GTFS dataset stats
   routes                                      List all routes (id, short name, long name)
-  route-plan <from> <to> [--debug] [--alts N] Plan a route between two stops (id/name)
+  route-plan <from> <to> [--debug] [--alts N] [--depart HH:MM] [--date YYYY-MM-DD]
+                                              Plan a route between two stops (id/name)
   route-stops <route> [--all]                 List stops in order for a route (default: longest variant only)
   stop-inspect <query>                        Inspect stop by id/code/name and list serving routes
   cache-build [gtfs_path] [cache_file]        Rebuild snapshot + planner caches (default snapshot: gtfs.cache.bin)
@@ -22,6 +25,8 @@ Examples:
   oeffi cache-build
   oeffi route-plan "Karlsplatz" "Praterstern"
   oeffi route-plan "Herrengasse" "Praterstern" --debug --alts 3
+  oeffi route-plan "Herrengasse" "Praterstern" --depart 22:15
+  oeffi route-plan "Herrengasse" "Praterstern" --date 2026-03-02 --depart 08:15
   oeffi route-stops U1
   oeffi route-stops U1 --all
   oeffi stop-inspect Karlsplatz
@@ -37,6 +42,8 @@ pub enum Command {
         to: String,
         debug: bool,
         alternatives: usize,
+        depart_secs: Option<usize>,
+        service_date: Option<NaiveDate>,
     },
     RouteStops {
         route: String,
@@ -60,6 +67,32 @@ fn default_cache_path() -> String {
     DEFAULT_CACHE_PATH.to_string()
 }
 
+fn parse_depart_hhmm(value: &str) -> Result<usize, String> {
+    let mut parts = value.split(':');
+    let (Some(h), Some(m), None) = (parts.next(), parts.next(), parts.next()) else {
+        return Err(format!(
+            "Invalid value for '--depart': '{value}'. Expected HH:MM (24h)."
+        ));
+    };
+    let hour = h
+        .parse::<usize>()
+        .map_err(|_| format!("Invalid value for '--depart': '{value}'. Expected HH:MM (24h)."))?;
+    let minute = m
+        .parse::<usize>()
+        .map_err(|_| format!("Invalid value for '--depart': '{value}'. Expected HH:MM (24h)."))?;
+    if hour > 23 || minute > 59 {
+        return Err(format!(
+            "Invalid value for '--depart': '{value}'. Expected HH:MM (24h)."
+        ));
+    }
+    Ok(hour * 3600 + minute * 60)
+}
+
+fn parse_service_date(value: &str) -> Result<NaiveDate, String> {
+    NaiveDate::parse_from_str(value, "%Y-%m-%d")
+        .map_err(|_| format!("Invalid value for '--date': '{value}'. Expected YYYY-MM-DD."))
+}
+
 pub fn parse_command(args: &[String]) -> Result<Command, String> {
     if args.is_empty() {
         return Ok(Command::Help);
@@ -76,7 +109,7 @@ pub fn parse_command(args: &[String]) -> Result<Command, String> {
         "route-plan" => {
             if args.len() < 3 {
                 return Err(
-                    "Invalid arguments for 'route-plan'. Usage: oeffi route-plan <from> <to> [--debug] [--alts N]"
+                    "Invalid arguments for 'route-plan'. Usage: oeffi route-plan <from> <to> [--debug] [--alts N] [--depart HH:MM] [--date YYYY-MM-DD]"
                         .to_string(),
                 );
             }
@@ -85,6 +118,8 @@ pub fn parse_command(args: &[String]) -> Result<Command, String> {
             let to = args[2].clone();
             let mut debug = false;
             let mut alternatives: usize = 3;
+            let mut depart_secs: Option<usize> = None;
+            let mut service_date: Option<NaiveDate> = None;
 
             let mut i = 3usize;
             while i < args.len() {
@@ -96,7 +131,7 @@ pub fn parse_command(args: &[String]) -> Result<Command, String> {
                 }
                 if arg == "--alts" {
                     let value = args.get(i + 1).ok_or_else(|| {
-                        "Missing value for '--alts'. Usage: oeffi route-plan <from> <to> [--debug] [--alts N]"
+                        "Missing value for '--alts'. Usage: oeffi route-plan <from> <to> [--debug] [--alts N] [--depart HH:MM] [--date YYYY-MM-DD]"
                             .to_string()
                     })?;
                     alternatives = value.parse::<usize>().map_err(|_| {
@@ -124,9 +159,37 @@ pub fn parse_command(args: &[String]) -> Result<Command, String> {
                     i += 1;
                     continue;
                 }
+                if arg == "--depart" {
+                    let value = args.get(i + 1).ok_or_else(|| {
+                        "Missing value for '--depart'. Usage: oeffi route-plan <from> <to> [--debug] [--alts N] [--depart HH:MM] [--date YYYY-MM-DD]"
+                            .to_string()
+                    })?;
+                    depart_secs = Some(parse_depart_hhmm(value)?);
+                    i += 2;
+                    continue;
+                }
+                if let Some(value) = arg.strip_prefix("--depart=") {
+                    depart_secs = Some(parse_depart_hhmm(value)?);
+                    i += 1;
+                    continue;
+                }
+                if arg == "--date" {
+                    let value = args.get(i + 1).ok_or_else(|| {
+                        "Missing value for '--date'. Usage: oeffi route-plan <from> <to> [--debug] [--alts N] [--depart HH:MM] [--date YYYY-MM-DD]"
+                            .to_string()
+                    })?;
+                    service_date = Some(parse_service_date(value)?);
+                    i += 2;
+                    continue;
+                }
+                if let Some(value) = arg.strip_prefix("--date=") {
+                    service_date = Some(parse_service_date(value)?);
+                    i += 1;
+                    continue;
+                }
 
                 return Err(
-                    "Invalid arguments for 'route-plan'. Usage: oeffi route-plan <from> <to> [--debug] [--alts N]"
+                    "Invalid arguments for 'route-plan'. Usage: oeffi route-plan <from> <to> [--debug] [--alts N] [--depart HH:MM] [--date YYYY-MM-DD]"
                         .to_string(),
                 );
             }
@@ -136,6 +199,8 @@ pub fn parse_command(args: &[String]) -> Result<Command, String> {
                 to,
                 debug,
                 alternatives,
+                depart_secs,
+                service_date,
             })
         }
         "route-stops" => {
@@ -224,8 +289,13 @@ mod tests {
         ];
         assert!(matches!(
             parse_command(&args),
-            Ok(Command::RoutePlan { from, to, debug, alternatives })
-                if from == "Karlsplatz" && to == "Praterstern" && !debug && alternatives == 3
+            Ok(Command::RoutePlan { from, to, debug, alternatives, depart_secs, service_date })
+                if from == "Karlsplatz"
+                    && to == "Praterstern"
+                    && !debug
+                    && alternatives == 3
+                    && depart_secs.is_none()
+                    && service_date.is_none()
         ));
     }
 
@@ -241,9 +311,73 @@ mod tests {
         ];
         assert!(matches!(
             parse_command(&args),
-            Ok(Command::RoutePlan { from, to, debug, alternatives })
-                if from == "Herrengasse" && to == "Praterstern" && debug && alternatives == 5
+            Ok(Command::RoutePlan { from, to, debug, alternatives, depart_secs, service_date })
+                if from == "Herrengasse"
+                    && to == "Praterstern"
+                    && debug
+                    && alternatives == 5
+                    && depart_secs.is_none()
+                    && service_date.is_none()
         ));
+    }
+
+    #[test]
+    fn parses_route_plan_with_depart_time() {
+        let args = vec![
+            "route-plan".to_string(),
+            "Herrengasse".to_string(),
+            "Praterstern".to_string(),
+            "--depart".to_string(),
+            "22:15".to_string(),
+        ];
+        assert!(matches!(
+            parse_command(&args),
+            Ok(Command::RoutePlan { depart_secs, service_date, .. })
+                if depart_secs == Some(80_100) && service_date.is_none()
+        ));
+    }
+
+    #[test]
+    fn parses_route_plan_with_service_date() {
+        let args = vec![
+            "route-plan".to_string(),
+            "Herrengasse".to_string(),
+            "Praterstern".to_string(),
+            "--date".to_string(),
+            "2026-03-02".to_string(),
+        ];
+        assert!(matches!(
+            parse_command(&args),
+            Ok(Command::RoutePlan { depart_secs, service_date, .. })
+                if depart_secs.is_none()
+                    && service_date == NaiveDate::from_ymd_opt(2026, 3, 2)
+        ));
+    }
+
+    #[test]
+    fn rejects_route_plan_with_invalid_depart_time() {
+        let args = vec![
+            "route-plan".to_string(),
+            "Herrengasse".to_string(),
+            "Praterstern".to_string(),
+            "--depart".to_string(),
+            "25:99".to_string(),
+        ];
+        let err = parse_command(&args).expect_err("expected parse failure");
+        assert!(err.contains("Invalid value for '--depart'"));
+    }
+
+    #[test]
+    fn rejects_route_plan_with_invalid_service_date() {
+        let args = vec![
+            "route-plan".to_string(),
+            "Herrengasse".to_string(),
+            "Praterstern".to_string(),
+            "--date".to_string(),
+            "2026-99-99".to_string(),
+        ];
+        let err = parse_command(&args).expect_err("expected parse failure");
+        assert!(err.contains("Invalid value for '--date'"));
     }
 
     #[test]

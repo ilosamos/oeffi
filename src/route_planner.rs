@@ -5,6 +5,8 @@ mod query;
 mod raptor_adapter;
 
 use crate::cli::DEFAULT_GTFS_PATH;
+use crate::merge::ensure_combined_source_ready;
+use chrono::NaiveDate;
 
 pub use cache::rebuild_planner_cache;
 
@@ -13,9 +15,19 @@ pub fn cmd_route_plan(
     to_query: &str,
     debug: bool,
     alternatives: usize,
+    depart_secs: Option<usize>,
+    service_date: Option<NaiveDate>,
 ) -> Result<(), String> {
+    ensure_combined_source_ready(DEFAULT_GTFS_PATH)?;
     let cache = cache::load_or_build_planner_cache(DEFAULT_GTFS_PATH)?;
-    let result = query::plan_route(&cache, from_query, to_query, alternatives)?;
+    let result = query::plan_route(
+        &cache,
+        from_query,
+        to_query,
+        alternatives,
+        depart_secs,
+        service_date,
+    )?;
     output::print_route_plan(&cache, &result, debug);
     Ok(())
 }

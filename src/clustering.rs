@@ -20,12 +20,34 @@ pub trait ClusterStopAccessor {
     fn parent_station(&self) -> Option<&str>;
 }
 
+fn station_stem_from_stop_id(stop_id: &str) -> Option<String> {
+    let mut parts = stop_id.split(':');
+    let (Some(country), Some(region), Some(station)) = (parts.next(), parts.next(), parts.next())
+    else {
+        return None;
+    };
+
+    if country.is_empty() || region.is_empty() || station.is_empty() {
+        return None;
+    }
+
+    Some(format!("{country}:{region}:{station}"))
+}
+
+fn simplify_station_name(name: &str) -> String {
+    name.strip_prefix("Wien ").unwrap_or(name).to_string()
+}
+
 pub fn stop_cluster_key(
     stop_id: &str,
     stop_name: &str,
     parent_station: Option<&str>,
     parent_station_ids: &HashSet<String>,
 ) -> String {
+    if let Some(station_stem) = station_stem_from_stop_id(stop_id) {
+        return format!("stem::{station_stem}");
+    }
+
     if let Some(parent_id) = parent_station {
         if !parent_id.is_empty() {
             return format!("parent::{parent_id}");
@@ -70,10 +92,10 @@ pub fn build_stop_clusters<T: ClusterStopAccessor>(
                 stop_idx_by_id
                     .get(parent_id)
                     .and_then(|idx| stops.get(*idx as usize))
-                    .map(|parent| parent.name().to_string())
-                    .unwrap_or_else(|| stop.name().to_string())
+                    .map(|parent| simplify_station_name(parent.name()))
+                    .unwrap_or_else(|| simplify_station_name(stop.name()))
             } else {
-                stop.name().to_string()
+                simplify_station_name(stop.name())
             };
 
             let new_idx = clusters.len() as u32;

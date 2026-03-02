@@ -4,12 +4,14 @@ use crate::build::build_snapshot;
 use crate::cache::{load_or_build_snapshot, save_snapshot};
 use crate::cli::DEFAULT_CACHE_PATH;
 use crate::matcher::{exact_key_case_insensitive, fuzzy_best_key};
+use crate::merge::ensure_combined_source_ready;
 use crate::route_planner::rebuild_planner_cache;
 use crate::snapshot::{StopCluster, StopRecord};
 
 const STOP_FUZZY_THRESHOLD: f64 = 0.93;
 
 pub fn cmd_cache_build(source_path: &str, cache_path: &str) -> Result<(), String> {
+    ensure_combined_source_ready(source_path)?;
     // Always rebuild both caches from source GTFS files.
     let snapshot = build_snapshot(source_path)?;
     save_snapshot(cache_path, &snapshot)?;
@@ -30,6 +32,7 @@ pub fn cmd_cache_build(source_path: &str, cache_path: &str) -> Result<(), String
 }
 
 pub fn cmd_gtfs_summary(source_path: &str) -> Result<(), String> {
+    ensure_combined_source_ready(source_path)?;
     // Reuse cache when possible, otherwise build it once transparently.
     let snapshot = load_or_build_snapshot(source_path, DEFAULT_CACHE_PATH)?;
 
@@ -45,6 +48,7 @@ pub fn cmd_gtfs_summary(source_path: &str) -> Result<(), String> {
 }
 
 pub fn cmd_list_routes(source_path: &str) -> Result<(), String> {
+    ensure_combined_source_ready(source_path)?;
     // Load snapshot and print a compact route table.
     let snapshot = load_or_build_snapshot(source_path, DEFAULT_CACHE_PATH)?;
 
@@ -64,6 +68,7 @@ pub fn cmd_list_routes(source_path: &str) -> Result<(), String> {
 }
 
 pub fn cmd_route_stops(source_path: &str, route_name: &str, show_all: bool) -> Result<(), String> {
+    ensure_combined_source_ready(source_path)?;
     let snapshot = load_or_build_snapshot(source_path, DEFAULT_CACHE_PATH)?;
 
     // Accept either route short name (e.g. "U1") or explicit route id.
@@ -225,6 +230,7 @@ fn collect_route_ids_for_cluster(
 }
 
 pub fn cmd_stop_inspect(source_path: &str, query: &str) -> Result<(), String> {
+    ensure_combined_source_ready(source_path)?;
     let snapshot = load_or_build_snapshot(source_path, DEFAULT_CACHE_PATH)?;
     let query_upper = query.to_ascii_uppercase();
 

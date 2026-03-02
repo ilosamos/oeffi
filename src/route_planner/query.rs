@@ -1,7 +1,7 @@
 use std::cmp::Ordering;
 
 use crate::matcher::{exact_key_case_insensitive, fuzzy_best_key};
-use chrono::{Local, Timelike};
+use chrono::{Local, NaiveDate, Timelike};
 use raptor::Journey;
 use raptor::Timetable;
 
@@ -135,10 +135,16 @@ pub fn plan_route(
     from_query: &str,
     to_query: &str,
     alternatives: usize,
+    depart_secs_override: Option<usize>,
+    query_date_override: Option<NaiveDate>,
 ) -> Result<RoutePlanResult, String> {
     let now = Local::now();
-    let query_date = now.date_naive();
-    let depart_secs = now.time().num_seconds_from_midnight() as usize;
+    let query_date = query_date_override.unwrap_or(now.date_naive());
+    let depart_secs = match (depart_secs_override, query_date_override) {
+        (Some(dep), _) => dep,
+        (None, Some(_)) => 0,
+        (None, None) => now.time().num_seconds_from_midnight() as usize,
+    };
 
     let from_station_idxs = match_station_idxs(cache, from_query);
     if from_station_idxs.is_empty() {
@@ -295,6 +301,8 @@ mod tests {
     use chrono::NaiveDate;
     use raptor::Timetable;
 
+    use crate::cli::DEFAULT_GTFS_PATH;
+    use crate::merge::ensure_combined_source_ready;
     use crate::snapshot::SourceFingerprint;
 
     use super::*;
@@ -474,13 +482,17 @@ mod tests {
 
     #[test]
     fn herrengasse_praterstern_regression_if_dataset_available() {
-        if !Path::new("data/stops.txt").exists() {
+        if !Path::new("data/wiener-linien/stops.txt").exists()
+            || !Path::new("data/oebb/stops.txt").exists()
+        {
             return;
         }
 
-        let cache =
-            super::super::cache::load_or_build_planner_cache("data").expect("planner cache");
-        let result = plan_route(&cache, "Herrengasse", "Praterstern", 1).expect("route exists");
+        ensure_combined_source_ready(DEFAULT_GTFS_PATH).expect("combined source ready");
+        let cache = super::super::cache::load_or_build_planner_cache(DEFAULT_GTFS_PATH)
+            .expect("planner cache");
+        let result =
+            plan_route(&cache, "Herrengasse", "Praterstern", 1, None, None).expect("route exists");
         assert!(!result.chosen_legs.is_empty());
     }
 }

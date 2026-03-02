@@ -5,6 +5,7 @@ mod cli;
 mod clustering;
 mod commands;
 mod matcher;
+mod merge;
 mod route_planner;
 mod snapshot;
 
@@ -22,7 +23,16 @@ fn run(command: Command) -> ExitCode {
             to,
             debug,
             alternatives,
-        } => route_planner::cmd_route_plan(&from, &to, debug, alternatives),
+            depart_secs,
+            service_date,
+        } => route_planner::cmd_route_plan(
+            &from,
+            &to,
+            debug,
+            alternatives,
+            depart_secs,
+            service_date,
+        ),
         Command::RouteStops { route, show_all } => {
             commands::cmd_route_stops(DEFAULT_GTFS_PATH, &route, show_all)
         }
