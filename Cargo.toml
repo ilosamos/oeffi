@@ -2,6 +2,20 @@
 name = "oeffi"
 version = "0.1.0"
 edition = "2024"
+description = "Fast local CLI for Vienna transit routing on GTFS data"
+readme = "README.md"
+repository = "https://github.com/ilosamos/oeffi"
+homepage = "https://github.com/ilosamos/oeffi"
+license-file = "LICENSE"
+keywords = ["gtfs", "transit", "routing", "vienna", "cli"]
+categories = ["command-line-utilities"]
+exclude = [
+  "data/**",
+  "*.cache.bin",
+  "target/**",
+  ".github/**",
+  ".DS_Store",
+]
 
 [dependencies]
 serde = { version = "1.0", features = ["derive"] }
