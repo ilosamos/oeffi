@@ -1,24 +1,53 @@
 use std::collections::{HashMap, HashSet};
+use std::path::Path;
 
 use crate::build::build_snapshot;
 use crate::cache::{load_or_build_snapshot, save_snapshot};
-use crate::cli::DEFAULT_CACHE_PATH;
+use crate::config::{
+    AppConfig, LoadedConfig, config_keys, env_var_for_key, get_config_value, persist_file_config,
+    set_config_value,
+};
+use crate::download::download_gtfs_zip_to_dir;
 use crate::matcher::{
     GENERIC_QUERY_TOKENS, NameMatchMode, exact_key_case_insensitive, match_name_candidates,
     normalize_for_match, relaxed_name_matches,
 };
-use crate::merge::ensure_combined_source_ready;
+use crate::merge::{ensure_combined_source_ready, validate_raw_sources};
 use crate::route_planner::rebuild_planner_cache;
 use crate::snapshot::{StopCluster, StopRecord};
 
 const STOP_FUZZY_THRESHOLD: f64 = 0.94;
 
-pub fn cmd_cache_build(source_path: &str, cache_path: &str) -> Result<(), String> {
-    ensure_combined_source_ready(source_path)?;
+pub fn cmd_cache_build(
+    config: &AppConfig,
+    source_path_override: Option<&str>,
+    cache_path_override: Option<&str>,
+    download: bool,
+) -> Result<(), String> {
+    let source_path = source_path_override.unwrap_or(&config.merged_gtfs_path);
+    let cache_path = cache_path_override.unwrap_or(&config.snapshot_cache_path);
+    let planner_cache_path = &config.planner_cache_path;
+
+    if download {
+        download_raw_data(config, true)?;
+    } else {
+        ensure_raw_sources_exist(config).map_err(|err| {
+            format!("{err}\nHint: run `oeffi cache-build --download` for first-time setup.")
+        })?;
+    }
+
+    eprintln!("Preprocessing raw GTFS data (merge) ...");
+    ensure_combined_source_ready(
+        source_path,
+        &config.wiener_linien_source_dir,
+        &config.oebb_source_dir,
+    )?;
     // Always rebuild both caches from source GTFS files.
+    eprintln!("Rebuilding snapshot cache: {cache_path}");
     let snapshot = build_snapshot(source_path)?;
     save_snapshot(cache_path, &snapshot)?;
-    let planner = rebuild_planner_cache(source_path)?;
+    eprintln!("Rebuilding planner cache: {planner_cache_path}");
+    let planner = rebuild_planner_cache(source_path, planner_cache_path)?;
 
     println!("Built snapshot cache: {cache_path}");
     println!("  source: {}", snapshot.fingerprint.source_path);
@@ -26,7 +55,7 @@ pub fn cmd_cache_build(source_path: &str, cache_path: &str) -> Result<(), String
     println!("  size: {} bytes", snapshot.fingerprint.total_size_bytes);
     println!("  routes: {}", snapshot.summary.routes);
     println!("  trips: {}", snapshot.summary.trips);
-    println!("Built planner cache: planner.cache.bin");
+    println!("Built planner cache: {planner_cache_path}");
     println!("  stations: {}", planner.stations_count());
     println!("  routes: {}", planner.routes_count());
     println!("  trips: {}", planner.trips_count());
@@ -34,12 +63,40 @@ pub fn cmd_cache_build(source_path: &str, cache_path: &str) -> Result<(), String
     Ok(())
 }
 
-pub fn cmd_gtfs_summary(source_path: &str) -> Result<(), String> {
-    ensure_combined_source_ready(source_path)?;
-    // Reuse cache when possible, otherwise build it once transparently.
-    let snapshot = load_or_build_snapshot(source_path, DEFAULT_CACHE_PATH)?;
+pub fn cmd_init(config: &AppConfig, force: bool) -> Result<(), String> {
+    let raw_sources_present =
+        validate_raw_sources(&config.wiener_linien_source_dir, &config.oebb_source_dir).is_ok();
 
-    println!("GTFS summary for {source_path} (via cache: {DEFAULT_CACHE_PATH})");
+    if raw_sources_present && !force {
+        return Err(
+            "Raw GTFS data already exists. Re-run with `oeffi init --force` to overwrite."
+                .to_string(),
+        );
+    }
+
+    if force && raw_sources_present {
+        eprintln!("`--force` set: existing raw GTFS data will be overwritten.");
+    }
+
+    eprintln!("Initializing local data and caches ...");
+    download_raw_data(config, true)?;
+    cmd_cache_build(config, None, None, false)?;
+    eprintln!("Initialization complete.");
+    Ok(())
+}
+
+pub fn cmd_gtfs_summary(config: &AppConfig) -> Result<(), String> {
+    let source_path = &config.merged_gtfs_path;
+    let cache_path = &config.snapshot_cache_path;
+    ensure_combined_source_ready(
+        source_path,
+        &config.wiener_linien_source_dir,
+        &config.oebb_source_dir,
+    )?;
+    // Reuse cache when possible, otherwise build it once transparently.
+    let snapshot = load_or_build_snapshot(source_path, cache_path)?;
+
+    println!("GTFS summary for {source_path} (via cache: {cache_path})");
     println!("  agencies: {}", snapshot.summary.agencies);
     println!("  routes: {}", snapshot.summary.routes);
     println!("  trips: {}", snapshot.summary.trips);
@@ -50,13 +107,19 @@ pub fn cmd_gtfs_summary(source_path: &str) -> Result<(), String> {
     Ok(())
 }
 
-pub fn cmd_list_routes(source_path: &str) -> Result<(), String> {
-    ensure_combined_source_ready(source_path)?;
+pub fn cmd_list_routes(config: &AppConfig) -> Result<(), String> {
+    let source_path = &config.merged_gtfs_path;
+    let cache_path = &config.snapshot_cache_path;
+    ensure_combined_source_ready(
+        source_path,
+        &config.wiener_linien_source_dir,
+        &config.oebb_source_dir,
+    )?;
     // Load snapshot and print a compact route table.
-    let snapshot = load_or_build_snapshot(source_path, DEFAULT_CACHE_PATH)?;
+    let snapshot = load_or_build_snapshot(source_path, cache_path)?;
 
     println!(
-        "Routes in {source_path} ({} total, via cache: {DEFAULT_CACHE_PATH}):",
+        "Routes in {source_path} ({} total, via cache: {cache_path}):",
         snapshot.routes.len()
     );
 
@@ -70,12 +133,18 @@ pub fn cmd_list_routes(source_path: &str) -> Result<(), String> {
     Ok(())
 }
 
-pub fn cmd_list_stops(source_path: &str) -> Result<(), String> {
-    ensure_combined_source_ready(source_path)?;
-    let snapshot = load_or_build_snapshot(source_path, DEFAULT_CACHE_PATH)?;
+pub fn cmd_list_stops(config: &AppConfig) -> Result<(), String> {
+    let source_path = &config.merged_gtfs_path;
+    let cache_path = &config.snapshot_cache_path;
+    ensure_combined_source_ready(
+        source_path,
+        &config.wiener_linien_source_dir,
+        &config.oebb_source_dir,
+    )?;
+    let snapshot = load_or_build_snapshot(source_path, cache_path)?;
 
     println!(
-        "Clustered stops in {source_path} ({} total, via cache: {DEFAULT_CACHE_PATH}):",
+        "Clustered stops in {source_path} ({} total, via cache: {cache_path}):",
         snapshot.stop_clusters.len()
     );
 
@@ -86,9 +155,15 @@ pub fn cmd_list_stops(source_path: &str) -> Result<(), String> {
     Ok(())
 }
 
-pub fn cmd_route_stops(source_path: &str, route_name: &str) -> Result<(), String> {
-    ensure_combined_source_ready(source_path)?;
-    let snapshot = load_or_build_snapshot(source_path, DEFAULT_CACHE_PATH)?;
+pub fn cmd_route_stops(config: &AppConfig, route_name: &str) -> Result<(), String> {
+    let source_path = &config.merged_gtfs_path;
+    let cache_path = &config.snapshot_cache_path;
+    ensure_combined_source_ready(
+        source_path,
+        &config.wiener_linien_source_dir,
+        &config.oebb_source_dir,
+    )?;
+    let snapshot = load_or_build_snapshot(source_path, cache_path)?;
 
     // Accept either route short name (e.g. "U1") or explicit route id.
     let query_upper = route_name.to_ascii_uppercase();
@@ -148,7 +223,7 @@ pub fn cmd_route_stops(source_path: &str, route_name: &str) -> Result<(), String
     selected_ids.sort();
     selected_ids.dedup();
 
-    println!("Line {route_name} in {source_path} (via cache: {DEFAULT_CACHE_PATH})");
+    println!("Line {route_name} in {source_path} (via cache: {cache_path})");
 
     for route_id in selected_ids {
         if let Some(stops) = snapshot.route_stops_by_route_id.get(&route_id) {
@@ -226,9 +301,15 @@ fn collect_route_ids_for_cluster(
     sorted
 }
 
-pub fn cmd_stop_inspect(source_path: &str, query: &str) -> Result<(), String> {
-    ensure_combined_source_ready(source_path)?;
-    let snapshot = load_or_build_snapshot(source_path, DEFAULT_CACHE_PATH)?;
+pub fn cmd_stop_inspect(config: &AppConfig, query: &str) -> Result<(), String> {
+    let source_path = &config.merged_gtfs_path;
+    let cache_path = &config.snapshot_cache_path;
+    ensure_combined_source_ready(
+        source_path,
+        &config.wiener_linien_source_dir,
+        &config.oebb_source_dir,
+    )?;
+    let snapshot = load_or_build_snapshot(source_path, cache_path)?;
     let query_upper = query.to_ascii_uppercase();
 
     let stop_by_id: HashMap<&str, &StopRecord> = snapshot
@@ -380,7 +461,7 @@ pub fn cmd_stop_inspect(source_path: &str, query: &str) -> Result<(), String> {
         .map(|route| (route.id.as_str(), route))
         .collect();
 
-    println!("Stop inspect for '{query}' in {source_path} (via cache: {DEFAULT_CACHE_PATH})");
+    println!("Stop inspect for '{query}' in {source_path} (via cache: {cache_path})");
     println!("Match mode: {match_mode}");
 
     // Print each matched logical station cluster with platform details and serving routes.
@@ -421,4 +502,97 @@ pub fn cmd_stop_inspect(source_path: &str, query: &str) -> Result<(), String> {
     }
 
     Ok(())
+}
+
+pub fn cmd_config_list(loaded: &LoadedConfig) -> Result<(), String> {
+    println!("Config file: {}", loaded.paths.config_path.display());
+    println!();
+
+    for key in config_keys() {
+        let value = get_config_value(&loaded.effective_config, key)
+            .ok_or_else(|| format!("Missing config key '{key}'"))?;
+        if let Some(env_name) = env_var_for_key(key) {
+            if loaded.env_overrides.contains(env_name) {
+                println!("{key}={value}  (env: {env_name})");
+                continue;
+            }
+        }
+        println!("{key}={value}");
+    }
+
+    Ok(())
+}
+
+pub fn cmd_config_get(loaded: &LoadedConfig, key: &str) -> Result<(), String> {
+    let value = get_config_value(&loaded.effective_config, key).ok_or_else(|| {
+        format!(
+            "unknown config key '{key}'. Valid keys: {}",
+            config_keys().join(", ")
+        )
+    })?;
+
+    println!("{value}");
+    Ok(())
+}
+
+pub fn cmd_config_set(loaded: &LoadedConfig, key: &str, value: &str) -> Result<(), String> {
+    let mut updated = loaded.file_config.clone();
+    set_config_value(&mut updated, key, value.to_string())?;
+    persist_file_config(&loaded.paths, &updated)?;
+
+    // Keep directory structure usable after changes to path keys.
+    if key.ends_with("_path") || key.ends_with("_dir") || key == "raw_data_root" {
+        let to_create = Path::new(value);
+        if key.ends_with("_path") {
+            if let Some(parent) = to_create.parent() {
+                std::fs::create_dir_all(parent).map_err(|err| {
+                    format!(
+                        "Saved config but failed to create parent directory '{}': {err}",
+                        parent.display()
+                    )
+                })?;
+            }
+        } else {
+            std::fs::create_dir_all(to_create).map_err(|err| {
+                format!(
+                    "Saved config but failed to create directory '{}': {err}",
+                    to_create.display()
+                )
+            })?;
+        }
+    }
+
+    println!("Updated '{key}' in {}", loaded.paths.config_path.display());
+    if let Some(env_name) = env_var_for_key(key) {
+        if loaded.env_overrides.contains(env_name) {
+            println!("Note: currently overridden by env var {env_name}");
+        }
+    }
+    Ok(())
+}
+
+fn ensure_raw_sources_exist(config: &AppConfig) -> Result<(), String> {
+    validate_raw_sources(&config.wiener_linien_source_dir, &config.oebb_source_dir)
+}
+
+fn download_raw_data(config: &AppConfig, replace_existing: bool) -> Result<(), String> {
+    if !replace_existing {
+        ensure_raw_sources_exist(config)?;
+        return Ok(());
+    }
+
+    eprintln!("Refreshing raw GTFS data sources ...");
+    download_gtfs_zip_to_dir(
+        &config.wiener_linien_gtfs_url,
+        &config.wiener_linien_source_dir,
+        "Wiener Linien",
+    )?;
+    download_gtfs_zip_to_dir(&config.oebb_gtfs_url, &config.oebb_source_dir, "ÖBB")?;
+    Ok(())
+}
+
+pub fn is_missing_local_data_error(message: &str) -> bool {
+    message.contains("Missing required GTFS source file")
+        || message.contains("Failed to load GTFS")
+        || message.contains("Cannot read source file")
 }

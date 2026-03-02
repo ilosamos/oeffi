@@ -42,11 +42,17 @@ pub fn cache_is_fresh(snapshot: &Snapshot, source_path: &str) -> Result<bool, St
 }
 
 pub fn load_or_build_snapshot(source_path: &str, cache_path: &str) -> Result<Snapshot, String> {
-    if let Ok(snapshot) = load_snapshot(cache_path) {
-        if cache_is_fresh(&snapshot, source_path)? {
-            return Ok(snapshot);
+    let rebuild_reason = match load_snapshot(cache_path) {
+        Ok(snapshot) => {
+            if cache_is_fresh(&snapshot, source_path)? {
+                return Ok(snapshot);
+            }
+            "stale"
         }
-    }
+        Err(_) => "missing or unreadable",
+    };
+
+    eprintln!("Rebuilding snapshot cache ({rebuild_reason}): {cache_path}");
 
     let snapshot = build_snapshot(source_path)?;
     save_snapshot(cache_path, &snapshot)?;

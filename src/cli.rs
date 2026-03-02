@@ -3,9 +3,6 @@ use std::iter;
 use chrono::NaiveDate;
 use clap::{CommandFactory, Parser, Subcommand, error::ErrorKind};
 
-pub const DEFAULT_GTFS_PATH: &str = "data/combined-vienna";
-pub const DEFAULT_CACHE_PATH: &str = "gtfs.cache.bin";
-
 #[derive(Debug)]
 pub enum Command {
     Summary,
@@ -36,8 +33,20 @@ pub enum Command {
         query: String,
     },
     CacheBuild {
-        source_path: String,
-        cache_path: String,
+        source_path: Option<String>,
+        cache_path: Option<String>,
+        download: bool,
+    },
+    Init {
+        force: bool,
+    },
+    ConfigList,
+    ConfigGet {
+        key: String,
+    },
+    ConfigSet {
+        key: String,
+        value: String,
     },
     Help,
 }
@@ -59,7 +68,12 @@ pub enum Command {
   oeffi inspect Karlsplatz
   oeffi routes
   oeffi summary
-  oeffi cache-build"
+  oeffi cache-build
+  oeffi cache-build --download
+  oeffi init
+  oeffi config list
+  oeffi config get merged_gtfs_path
+  oeffi config set planner_cache_path /tmp/planner.cache.bin"
 )]
 struct Cli {
     #[command(subcommand)]
@@ -108,10 +122,25 @@ enum CliCommand {
     Inspect { query: String },
     #[command(about = "List all routes (id, short name, long name)")]
     Routes,
-    #[command(about = "Rebuild snapshot + planner caches (default snapshot: gtfs.cache.bin)")]
+    #[command(about = "Rebuild snapshot + planner caches")]
     CacheBuild {
         source_path: Option<String>,
         cache_path: Option<String>,
+        #[arg(
+            long = "download",
+            help = "Download raw GTFS feeds before rebuilding caches"
+        )]
+        download: bool,
+    },
+    #[command(about = "First-run setup: download feeds, merge, and build caches")]
+    Init {
+        #[arg(short = 'f', long = "force", help = "Overwrite existing raw GTFS data")]
+        force: bool,
+    },
+    #[command(about = "Read and write persistent configuration")]
+    Config {
+        #[command(subcommand)]
+        command: ConfigSubcommand,
     },
     #[command(about = "Show high-level GTFS dataset stats")]
     Summary,
@@ -119,12 +148,14 @@ enum CliCommand {
     Help,
 }
 
-fn default_path() -> String {
-    DEFAULT_GTFS_PATH.to_string()
-}
-
-fn default_cache_path() -> String {
-    DEFAULT_CACHE_PATH.to_string()
+#[derive(Debug, Subcommand)]
+enum ConfigSubcommand {
+    #[command(about = "List effective config values")]
+    List,
+    #[command(about = "Read one config value by key")]
+    Get { key: String },
+    #[command(about = "Write one config value to config.json")]
+    Set { key: String, value: String },
 }
 
 fn parse_depart_hhmm(value: &str) -> Result<usize, String> {
@@ -227,9 +258,17 @@ pub fn parse_command(args: &[String]) -> Result<Command, clap::Error> {
         Some(CliCommand::CacheBuild {
             source_path,
             cache_path,
+            download,
         }) => Command::CacheBuild {
-            source_path: source_path.unwrap_or_else(default_path),
-            cache_path: cache_path.unwrap_or_else(default_cache_path),
+            source_path,
+            cache_path,
+            download,
+        },
+        Some(CliCommand::Init { force }) => Command::Init { force },
+        Some(CliCommand::Config { command }) => match command {
+            ConfigSubcommand::List => Command::ConfigList,
+            ConfigSubcommand::Get { key } => Command::ConfigGet { key },
+            ConfigSubcommand::Set { key, value } => Command::ConfigSet { key, value },
         },
         Some(CliCommand::Summary) => Command::Summary,
         Some(CliCommand::Help) | None => Command::Help,
@@ -354,8 +393,24 @@ mod tests {
     fn parses_cache_build_defaults() {
         assert!(matches!(
             parse_to_command(&["cache-build"]),
-            Command::CacheBuild { source_path, cache_path }
-                if source_path == DEFAULT_GTFS_PATH && cache_path == DEFAULT_CACHE_PATH
+            Command::CacheBuild { source_path, cache_path, download }
+                if source_path.is_none() && cache_path.is_none() && !download
+        ));
+    }
+
+    #[test]
+    fn parses_cache_build_with_download() {
+        assert!(matches!(
+            parse_to_command(&["cache-build", "--download"]),
+            Command::CacheBuild { download, .. } if download
+        ));
+    }
+
+    #[test]
+    fn parses_init_with_force() {
+        assert!(matches!(
+            parse_to_command(&["init", "--force"]),
+            Command::Init { force } if force
         ));
     }
 
@@ -364,6 +419,23 @@ mod tests {
         assert!(matches!(
             parse_to_command(&["inspect", "Karlsplatz"]),
             Command::Inspect { query } if query == "Karlsplatz"
+        ));
+    }
+
+    #[test]
+    fn parses_config_list() {
+        assert!(matches!(
+            parse_to_command(&["config", "list"]),
+            Command::ConfigList
+        ));
+    }
+
+    #[test]
+    fn parses_config_set() {
+        assert!(matches!(
+            parse_to_command(&["config", "set", "merged_gtfs_path", "/tmp/gtfs"]),
+            Command::ConfigSet { key, value }
+            if key == "merged_gtfs_path" && value == "/tmp/gtfs"
         ));
     }
 

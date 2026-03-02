@@ -9,7 +9,6 @@ pub const STOP_FUZZY_THRESHOLD: f64 = 0.94;
 pub const MAX_TRANSFERS: usize = 6;
 pub const MIN_TRANSFER_SECONDS: usize = 150;
 pub const DEFAULT_TRANSFER_SECONDS: usize = 300;
-pub const PLANNER_CACHE_PATH: &str = "planner.cache.bin";
 pub const PLANNER_CACHE_VERSION: u32 = 6;
 pub const PLANNER_CACHE_DECODE_LIMIT_BYTES: u64 = 1024 * 1024 * 1024;
 

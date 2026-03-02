@@ -13,8 +13,8 @@ use crate::clustering::{ClusterStopAccessor, build_stop_clusters};
 
 use super::model::{
     DEFAULT_TRANSFER_SECONDS, MIN_TRANSFER_SECONDS, PLANNER_CACHE_DECODE_LIMIT_BYTES,
-    PLANNER_CACHE_PATH, PLANNER_CACHE_VERSION, PlannerCache, PlannerRoute, PlannerServiceCalendar,
-    PlannerStation, PlannerStop, PlannerTrip,
+    PLANNER_CACHE_VERSION, PlannerCache, PlannerRoute, PlannerServiceCalendar, PlannerStation,
+    PlannerStop, PlannerTrip,
 };
 
 impl ClusterStopAccessor for PlannerStop {
@@ -453,17 +453,28 @@ fn planner_cache_fresh(cache: &PlannerCache, source_path: &str) -> Result<bool, 
     fingerprint_is_fresh(&cache.fingerprint, source_path)
 }
 
-pub fn load_or_build_planner_cache(source_path: &str) -> Result<PlannerCache, String> {
-    if let Ok(cache) = load_planner_cache(PLANNER_CACHE_PATH) {
-        if planner_cache_fresh(&cache, source_path)? {
-            return Ok(cache);
+pub fn load_or_build_planner_cache(
+    source_path: &str,
+    planner_cache_path: &str,
+) -> Result<PlannerCache, String> {
+    let rebuild_reason = match load_planner_cache(planner_cache_path) {
+        Ok(cache) => {
+            if planner_cache_fresh(&cache, source_path)? {
+                return Ok(cache);
+            }
+            "stale"
         }
-    }
-    rebuild_planner_cache(source_path)
+        Err(_) => "missing or unreadable",
+    };
+    eprintln!("Rebuilding planner cache ({rebuild_reason}): {planner_cache_path}");
+    rebuild_planner_cache(source_path, planner_cache_path)
 }
 
-pub fn rebuild_planner_cache(source_path: &str) -> Result<PlannerCache, String> {
+pub fn rebuild_planner_cache(
+    source_path: &str,
+    planner_cache_path: &str,
+) -> Result<PlannerCache, String> {
     let cache = build_planner_cache(source_path)?;
-    save_planner_cache(PLANNER_CACHE_PATH, &cache)?;
+    save_planner_cache(planner_cache_path, &cache)?;
     Ok(cache)
 }

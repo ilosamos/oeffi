@@ -4,11 +4,6 @@ use std::path::{Path, PathBuf};
 use std::time::UNIX_EPOCH;
 
 use csv::{ReaderBuilder, StringRecord, WriterBuilder};
-
-use crate::cli::DEFAULT_GTFS_PATH;
-
-const WIENER_LINIEN_SOURCE: &str = "data/wiener-linien";
-const OEBB_SOURCE: &str = "data/oebb";
 const META_FILE: &str = ".merge_fingerprint";
 const MERGE_SCHEMA_VERSION: u32 = 3;
 
@@ -34,6 +29,12 @@ const REQUIRED_FILES: [&str; 7] = [
     CALENDAR_FILE,
     CALENDAR_DATES_FILE,
 ];
+
+#[derive(Clone, Copy)]
+struct MergeSources<'a> {
+    wiener_linien_source: &'a str,
+    oebb_source: &'a str,
+}
 
 // Minimal metadata we keep from ÖBB routes in the merged Vienna feed.
 #[derive(Clone)]
@@ -128,10 +129,10 @@ fn csv_writer(path: &Path) -> Result<csv::Writer<std::fs::File>, String> {
         .map_err(|err| format!("Failed to create CSV '{}': {err}", path.display()))
 }
 
-fn required_sources_fingerprint() -> Result<String, String> {
+fn required_sources_fingerprint(sources: MergeSources<'_>) -> Result<String, String> {
     let mut lines = vec![format!("schema_version={MERGE_SCHEMA_VERSION}")];
 
-    for source in [WIENER_LINIEN_SOURCE, OEBB_SOURCE] {
+    for source in [sources.wiener_linien_source, sources.oebb_source] {
         for file in REQUIRED_FILES {
             let path = path_for(source, file);
             let meta = fs::metadata(&path)
@@ -156,6 +157,21 @@ fn combined_outputs_exist(output_root: &str) -> bool {
         .all(|file| path_for(output_root, file).is_file())
 }
 
+pub fn validate_raw_sources(wiener_linien_source: &str, oebb_source: &str) -> Result<(), String> {
+    for source in [wiener_linien_source, oebb_source] {
+        for file in REQUIRED_FILES {
+            let path = path_for(source, file);
+            if !path.is_file() {
+                return Err(format!(
+                    "Missing required GTFS source file '{}'.",
+                    path.display()
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
 fn is_commuter_route(short_name: &str) -> bool {
     let short = short_name.to_ascii_uppercase();
     if short.starts_with("REX") {
@@ -170,8 +186,8 @@ fn is_commuter_route(short_name: &str) -> bool {
     false
 }
 
-fn load_oebb_routes() -> Result<HashMap<String, OebbRoute>, String> {
-    let path = path_for(OEBB_SOURCE, ROUTES_FILE);
+fn load_oebb_routes(oebb_source: &str) -> Result<HashMap<String, OebbRoute>, String> {
+    let path = path_for(oebb_source, ROUTES_FILE);
     let mut rdr = csv_reader(&path)?;
     let headers = rdr
         .headers()
@@ -203,8 +219,8 @@ fn load_oebb_routes() -> Result<HashMap<String, OebbRoute>, String> {
     Ok(routes)
 }
 
-fn load_oebb_scoped_stops() -> Result<(Vec<OebbStop>, StopScope), String> {
-    let path = path_for(OEBB_SOURCE, STOPS_FILE);
+fn load_oebb_scoped_stops(oebb_source: &str) -> Result<(Vec<OebbStop>, StopScope), String> {
+    let path = path_for(oebb_source, STOPS_FILE);
     let mut rdr = csv_reader(&path)?;
     let headers = rdr
         .headers()
@@ -288,8 +304,11 @@ struct TripStopCounts {
     scoped_count: u16,
 }
 
-fn count_oebb_stops_per_trip(scope: &StopScope) -> Result<HashMap<String, TripStopCounts>, String> {
-    let path = path_for(OEBB_SOURCE, STOP_TIMES_FILE);
+fn count_oebb_stops_per_trip(
+    oebb_source: &str,
+    scope: &StopScope,
+) -> Result<HashMap<String, TripStopCounts>, String> {
+    let path = path_for(oebb_source, STOP_TIMES_FILE);
     let mut rdr = csv_reader(&path)?;
     let headers = rdr
         .headers()
@@ -323,6 +342,7 @@ fn count_oebb_stops_per_trip(scope: &StopScope) -> Result<HashMap<String, TripSt
 }
 
 fn select_oebb_trips(
+    oebb_source: &str,
     routes_by_id: &HashMap<String, OebbRoute>,
     counts_by_trip: &HashMap<String, TripStopCounts>,
 ) -> Result<
@@ -334,7 +354,7 @@ fn select_oebb_trips(
     ),
     String,
 > {
-    let path = path_for(OEBB_SOURCE, TRIPS_FILE);
+    let path = path_for(oebb_source, TRIPS_FILE);
     let mut rdr = csv_reader(&path)?;
     let headers = rdr
         .headers()
@@ -399,7 +419,11 @@ fn select_oebb_trips(
     Ok((trips, kept_trip_ids, kept_route_ids, kept_service_ids))
 }
 
-fn write_agency(output_root: &str, kept_oebb_agency_ids: &HashSet<String>) -> Result<(), String> {
+fn write_agency(
+    output_root: &str,
+    sources: MergeSources<'_>,
+    kept_oebb_agency_ids: &HashSet<String>,
+) -> Result<(), String> {
     let out_path = path_for(output_root, AGENCY_FILE);
     let mut wtr = csv_writer(&out_path)?;
     wtr.write_record([
@@ -412,7 +436,7 @@ fn write_agency(output_root: &str, kept_oebb_agency_ids: &HashSet<String>) -> Re
     ])
     .map_err(|err| format!("Failed writing '{}': {err}", out_path.display()))?;
 
-    for source in [WIENER_LINIEN_SOURCE, OEBB_SOURCE] {
+    for source in [sources.wiener_linien_source, sources.oebb_source] {
         let path = path_for(source, AGENCY_FILE);
         let mut rdr = csv_reader(&path)?;
         let headers = rdr
@@ -436,11 +460,11 @@ fn write_agency(output_root: &str, kept_oebb_agency_ids: &HashSet<String>) -> Re
                 continue;
             }
 
-            if source == OEBB_SOURCE && !kept_oebb_agency_ids.contains(agency_id) {
+            if source == sources.oebb_source && !kept_oebb_agency_ids.contains(agency_id) {
                 continue;
             }
 
-            let out_agency_id = if source == OEBB_SOURCE {
+            let out_agency_id = if source == sources.oebb_source {
                 prefixed_oebb_id(agency_id)
             } else {
                 agency_id.to_string()
@@ -469,6 +493,7 @@ fn write_agency(output_root: &str, kept_oebb_agency_ids: &HashSet<String>) -> Re
 
 fn write_routes(
     output_root: &str,
+    wiener_linien_source: &str,
     routes_by_id: &HashMap<String, OebbRoute>,
     kept_route_ids: &HashSet<String>,
 ) -> Result<HashSet<String>, String> {
@@ -485,7 +510,7 @@ fn write_routes(
     ])
     .map_err(|err| format!("Failed writing '{}': {err}", out_path.display()))?;
 
-    let wl_path = path_for(WIENER_LINIEN_SOURCE, ROUTES_FILE);
+    let wl_path = path_for(wiener_linien_source, ROUTES_FILE);
     let mut wl_rdr = csv_reader(&wl_path)?;
     let wl_headers = wl_rdr
         .headers()
@@ -544,7 +569,11 @@ fn write_routes(
     Ok(kept_oebb_agency_ids)
 }
 
-fn write_stops(output_root: &str, oebb_stops: &[OebbStop]) -> Result<(), String> {
+fn write_stops(
+    output_root: &str,
+    wiener_linien_source: &str,
+    oebb_stops: &[OebbStop],
+) -> Result<(), String> {
     let out_path = path_for(output_root, STOPS_FILE);
     let mut wtr = csv_writer(&out_path)?;
     wtr.write_record([
@@ -560,7 +589,7 @@ fn write_stops(output_root: &str, oebb_stops: &[OebbStop]) -> Result<(), String>
     ])
     .map_err(|err| format!("Failed writing '{}': {err}", out_path.display()))?;
 
-    let wl_path = path_for(WIENER_LINIEN_SOURCE, STOPS_FILE);
+    let wl_path = path_for(wiener_linien_source, STOPS_FILE);
     let mut wl_rdr = csv_reader(&wl_path)?;
     let wl_headers = wl_rdr
         .headers()
@@ -608,7 +637,11 @@ fn write_stops(output_root: &str, oebb_stops: &[OebbStop]) -> Result<(), String>
         .map_err(|err| format!("Failed flushing '{}': {err}", out_path.display()))
 }
 
-fn write_trips(output_root: &str, oebb_trips: &[OebbTrip]) -> Result<(), String> {
+fn write_trips(
+    output_root: &str,
+    wiener_linien_source: &str,
+    oebb_trips: &[OebbTrip],
+) -> Result<(), String> {
     let out_path = path_for(output_root, TRIPS_FILE);
     let mut wtr = csv_writer(&out_path)?;
     wtr.write_record([
@@ -622,7 +655,7 @@ fn write_trips(output_root: &str, oebb_trips: &[OebbTrip]) -> Result<(), String>
     ])
     .map_err(|err| format!("Failed writing '{}': {err}", out_path.display()))?;
 
-    let wl_path = path_for(WIENER_LINIEN_SOURCE, TRIPS_FILE);
+    let wl_path = path_for(wiener_linien_source, TRIPS_FILE);
     let mut wl_rdr = csv_reader(&wl_path)?;
     let wl_headers = wl_rdr
         .headers()
@@ -670,6 +703,7 @@ fn write_trips(output_root: &str, oebb_trips: &[OebbTrip]) -> Result<(), String>
 
 fn write_stop_times(
     output_root: &str,
+    sources: MergeSources<'_>,
     kept_oebb_trip_ids: &HashSet<String>,
     scoped_stop_ids: &HashSet<String>,
 ) -> Result<(), String> {
@@ -687,7 +721,7 @@ fn write_stop_times(
     ])
     .map_err(|err| format!("Failed writing '{}': {err}", out_path.display()))?;
 
-    let wl_path = path_for(WIENER_LINIEN_SOURCE, STOP_TIMES_FILE);
+    let wl_path = path_for(sources.wiener_linien_source, STOP_TIMES_FILE);
     let mut wl_rdr = csv_reader(&wl_path)?;
     let wl_headers = wl_rdr
         .headers()
@@ -718,7 +752,7 @@ fn write_stop_times(
         .map_err(|err| format!("Failed writing '{}': {err}", out_path.display()))?;
     }
 
-    let oebb_path = path_for(OEBB_SOURCE, STOP_TIMES_FILE);
+    let oebb_path = path_for(sources.oebb_source, STOP_TIMES_FILE);
     let mut oebb_rdr = csv_reader(&oebb_path)?;
     let oebb_headers = oebb_rdr
         .headers()
@@ -765,6 +799,7 @@ fn write_stop_times(
 
 fn write_calendar(
     output_root: &str,
+    sources: MergeSources<'_>,
     kept_oebb_service_ids: &HashSet<String>,
 ) -> Result<(), String> {
     let out_path = path_for(output_root, CALENDAR_FILE);
@@ -783,7 +818,7 @@ fn write_calendar(
     ])
     .map_err(|err| format!("Failed writing '{}': {err}", out_path.display()))?;
 
-    for source in [WIENER_LINIEN_SOURCE, OEBB_SOURCE] {
+    for source in [sources.wiener_linien_source, sources.oebb_source] {
         let path = path_for(source, CALENDAR_FILE);
         let mut rdr = csv_reader(&path)?;
         let headers = rdr
@@ -809,11 +844,11 @@ fn write_calendar(
                 continue;
             }
 
-            if source == OEBB_SOURCE && !kept_oebb_service_ids.contains(service_id) {
+            if source == sources.oebb_source && !kept_oebb_service_ids.contains(service_id) {
                 continue;
             }
 
-            let out_service_id = if source == OEBB_SOURCE {
+            let out_service_id = if source == sources.oebb_source {
                 prefixed_oebb_id(service_id)
             } else {
                 service_id.to_string()
@@ -841,6 +876,7 @@ fn write_calendar(
 
 fn write_calendar_dates(
     output_root: &str,
+    sources: MergeSources<'_>,
     kept_oebb_service_ids: &HashSet<String>,
 ) -> Result<(), String> {
     let out_path = path_for(output_root, CALENDAR_DATES_FILE);
@@ -848,7 +884,7 @@ fn write_calendar_dates(
     wtr.write_record(["service_id", "date", "exception_type"])
         .map_err(|err| format!("Failed writing '{}': {err}", out_path.display()))?;
 
-    for source in [WIENER_LINIEN_SOURCE, OEBB_SOURCE] {
+    for source in [sources.wiener_linien_source, sources.oebb_source] {
         let path = path_for(source, CALENDAR_DATES_FILE);
         let mut rdr = csv_reader(&path)?;
         let headers = rdr
@@ -866,11 +902,11 @@ fn write_calendar_dates(
             if service_id.is_empty() {
                 continue;
             }
-            if source == OEBB_SOURCE && !kept_oebb_service_ids.contains(service_id) {
+            if source == sources.oebb_source && !kept_oebb_service_ids.contains(service_id) {
                 continue;
             }
 
-            let out_service_id = if source == OEBB_SOURCE {
+            let out_service_id = if source == sources.oebb_source {
                 prefixed_oebb_id(service_id)
             } else {
                 service_id.to_string()
@@ -889,34 +925,51 @@ fn write_calendar_dates(
         .map_err(|err| format!("Failed flushing '{}': {err}", out_path.display()))
 }
 
-fn rebuild_combined_vienna_gtfs(output_root: &str) -> Result<(), String> {
+fn rebuild_combined_vienna_gtfs(
+    output_root: &str,
+    sources: MergeSources<'_>,
+) -> Result<(), String> {
     fs::create_dir_all(output_root)
         .map_err(|err| format!("Failed to create output directory '{output_root}': {err}"))?;
 
     // Build filtered ÖBB subset first, then append it to Wiener Linien files.
-    let (oebb_scoped_stops, scope) = load_oebb_scoped_stops()?;
-    let oebb_routes = load_oebb_routes()?;
-    let counts_by_trip = count_oebb_stops_per_trip(&scope)?;
+    let (oebb_scoped_stops, scope) = load_oebb_scoped_stops(sources.oebb_source)?;
+    let oebb_routes = load_oebb_routes(sources.oebb_source)?;
+    let counts_by_trip = count_oebb_stops_per_trip(sources.oebb_source, &scope)?;
     let (oebb_trips, kept_trip_ids, kept_route_ids, kept_service_ids) =
-        select_oebb_trips(&oebb_routes, &counts_by_trip)?;
+        select_oebb_trips(sources.oebb_source, &oebb_routes, &counts_by_trip)?;
 
-    let kept_oebb_agency_ids = write_routes(output_root, &oebb_routes, &kept_route_ids)?;
-    write_agency(output_root, &kept_oebb_agency_ids)?;
-    write_stops(output_root, &oebb_scoped_stops)?;
-    write_trips(output_root, &oebb_trips)?;
-    write_stop_times(output_root, &kept_trip_ids, &scope.scoped_stop_ids)?;
-    write_calendar(output_root, &kept_service_ids)?;
-    write_calendar_dates(output_root, &kept_service_ids)?;
+    let kept_oebb_agency_ids = write_routes(
+        output_root,
+        sources.wiener_linien_source,
+        &oebb_routes,
+        &kept_route_ids,
+    )?;
+    write_agency(output_root, sources, &kept_oebb_agency_ids)?;
+    write_stops(
+        output_root,
+        sources.wiener_linien_source,
+        &oebb_scoped_stops,
+    )?;
+    write_trips(output_root, sources.wiener_linien_source, &oebb_trips)?;
+    write_stop_times(output_root, sources, &kept_trip_ids, &scope.scoped_stop_ids)?;
+    write_calendar(output_root, sources, &kept_service_ids)?;
+    write_calendar_dates(output_root, sources, &kept_service_ids)?;
 
     Ok(())
 }
 
-pub fn ensure_combined_source_ready(source_path: &str) -> Result<(), String> {
-    if source_path != DEFAULT_GTFS_PATH {
-        return Ok(());
-    }
-
-    let fingerprint = required_sources_fingerprint()?;
+pub fn ensure_combined_source_ready(
+    source_path: &str,
+    wiener_linien_source: &str,
+    oebb_source: &str,
+) -> Result<(), String> {
+    validate_raw_sources(wiener_linien_source, oebb_source)?;
+    let sources = MergeSources {
+        wiener_linien_source,
+        oebb_source,
+    };
+    let fingerprint = required_sources_fingerprint(sources)?;
     let meta_path = path_for(source_path, META_FILE);
     // Rebuild only when source files changed or merged files are missing.
     if combined_outputs_exist(source_path)
@@ -926,7 +979,7 @@ pub fn ensure_combined_source_ready(source_path: &str) -> Result<(), String> {
         return Ok(());
     }
 
-    rebuild_combined_vienna_gtfs(source_path)?;
+    rebuild_combined_vienna_gtfs(source_path, sources)?;
     fs::write(&meta_path, fingerprint)
         .map_err(|err| format!("Failed writing '{}': {err}", meta_path.display()))
 }

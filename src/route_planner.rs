@@ -4,13 +4,14 @@ mod output;
 mod query;
 mod raptor_adapter;
 
-use crate::cli::DEFAULT_GTFS_PATH;
+use crate::config::AppConfig;
 use crate::merge::ensure_combined_source_ready;
 use chrono::NaiveDate;
 
 pub use cache::rebuild_planner_cache;
 
 pub fn cmd_route_plan(
+    config: &AppConfig,
     from_query: &str,
     to_query: &str,
     debug: bool,
@@ -18,8 +19,13 @@ pub fn cmd_route_plan(
     depart_secs: Option<usize>,
     service_date: Option<NaiveDate>,
 ) -> Result<(), String> {
-    ensure_combined_source_ready(DEFAULT_GTFS_PATH)?;
-    let cache = cache::load_or_build_planner_cache(DEFAULT_GTFS_PATH)?;
+    ensure_combined_source_ready(
+        &config.merged_gtfs_path,
+        &config.wiener_linien_source_dir,
+        &config.oebb_source_dir,
+    )?;
+    let cache =
+        cache::load_or_build_planner_cache(&config.merged_gtfs_path, &config.planner_cache_path)?;
     let result = query::plan_route(
         &cache,
         from_query,
@@ -33,6 +39,7 @@ pub fn cmd_route_plan(
 }
 
 pub fn cmd_route_plan_coords(
+    config: &AppConfig,
     from_lat: f64,
     from_lon: f64,
     to_lat: f64,
@@ -42,8 +49,13 @@ pub fn cmd_route_plan_coords(
     depart_secs: Option<usize>,
     service_date: Option<NaiveDate>,
 ) -> Result<(), String> {
-    ensure_combined_source_ready(DEFAULT_GTFS_PATH)?;
-    let cache = cache::load_or_build_planner_cache(DEFAULT_GTFS_PATH)?;
+    ensure_combined_source_ready(
+        &config.merged_gtfs_path,
+        &config.wiener_linien_source_dir,
+        &config.oebb_source_dir,
+    )?;
+    let cache =
+        cache::load_or_build_planner_cache(&config.merged_gtfs_path, &config.planner_cache_path)?;
     let result = query::plan_route_from_coords(
         &cache,
         from_lat,

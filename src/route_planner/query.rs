@@ -613,7 +613,6 @@ mod tests {
     use chrono::NaiveDate;
     use raptor::Timetable;
 
-    use crate::cli::DEFAULT_GTFS_PATH;
     use crate::merge::ensure_combined_source_ready;
     use crate::snapshot::SourceFingerprint;
 
@@ -621,6 +620,10 @@ mod tests {
     use crate::route_planner::model::{
         PlannerCache, PlannerRoute, PlannerServiceCalendar, PlannerStation, PlannerTrip,
     };
+    const TEST_MERGED_PATH: &str = "data/combined-vienna";
+    const TEST_WIENER_LINIEN_PATH: &str = "data/wiener-linien";
+    const TEST_OEBB_PATH: &str = "data/oebb";
+    const TEST_PLANNER_CACHE_PATH: &str = "planner.cache.bin";
 
     fn tiny_cache() -> PlannerCache {
         let stations = vec![
@@ -835,9 +838,13 @@ mod tests {
             return;
         }
 
-        ensure_combined_source_ready(DEFAULT_GTFS_PATH).expect("combined source ready");
-        let cache = super::super::cache::load_or_build_planner_cache(DEFAULT_GTFS_PATH)
-            .expect("planner cache");
+        ensure_combined_source_ready(TEST_MERGED_PATH, TEST_WIENER_LINIEN_PATH, TEST_OEBB_PATH)
+            .expect("combined source ready");
+        let cache = super::super::cache::load_or_build_planner_cache(
+            TEST_MERGED_PATH,
+            TEST_PLANNER_CACHE_PATH,
+        )
+        .expect("planner cache");
         let result = plan_route(
             &cache,
             "Herrengasse",
@@ -858,9 +865,13 @@ mod tests {
             return;
         }
 
-        ensure_combined_source_ready(DEFAULT_GTFS_PATH).expect("combined source ready");
-        let cache = super::super::cache::load_or_build_planner_cache(DEFAULT_GTFS_PATH)
-            .expect("planner cache");
+        ensure_combined_source_ready(TEST_MERGED_PATH, TEST_WIENER_LINIEN_PATH, TEST_OEBB_PATH)
+            .expect("combined source ready");
+        let cache = super::super::cache::load_or_build_planner_cache(
+            TEST_MERGED_PATH,
+            TEST_PLANNER_CACHE_PATH,
+        )
+        .expect("planner cache");
         let result = plan_route(
             &cache,
             "praterstern",
