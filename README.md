@@ -24,6 +24,7 @@ oeffi route-coords 48.2066 16.3707 48.1850 16.3747
 - Local-first: works from downloaded GTFS files
 - Readable: terminal output optimized for humans
 - Agent-friendly: simple commands and config access for automation
+- Built on [`raptor-rs`](https://github.com/keogami/raptor-rs) for RAPTOR-based route planning
 
 ## Install
 
