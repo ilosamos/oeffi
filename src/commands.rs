@@ -3,12 +3,15 @@ use std::collections::{HashMap, HashSet};
 use crate::build::build_snapshot;
 use crate::cache::{load_or_build_snapshot, save_snapshot};
 use crate::cli::DEFAULT_CACHE_PATH;
-use crate::matcher::{exact_key_case_insensitive, fuzzy_best_key};
+use crate::matcher::{
+    GENERIC_QUERY_TOKENS, NameMatchMode, exact_key_case_insensitive, match_name_candidates,
+    normalize_for_match, relaxed_name_matches,
+};
 use crate::merge::ensure_combined_source_ready;
 use crate::route_planner::rebuild_planner_cache;
 use crate::snapshot::{StopCluster, StopRecord};
 
-const STOP_FUZZY_THRESHOLD: f64 = 0.93;
+const STOP_FUZZY_THRESHOLD: f64 = 0.94;
 
 pub fn cmd_cache_build(source_path: &str, cache_path: &str) -> Result<(), String> {
     ensure_combined_source_ready(source_path)?;
@@ -234,8 +237,7 @@ pub fn cmd_stop_inspect(source_path: &str, query: &str) -> Result<(), String> {
         .map(|stop| (stop.id.as_str(), stop))
         .collect();
 
-    // Matching strategy (in order): cluster key, exact stop id, exact code, exact cluster name,
-    // exact stop name, fuzzy cluster/stop name.
+    // Matching strategy mirrors route planning: key/id/code, then exact/fuzzy/relaxed station name.
     let mut match_mode = "partial match (name/id/code)";
     let mut matched_cluster_idxs: Vec<u32> = snapshot
         .stop_cluster_idx_by_key
@@ -284,78 +286,71 @@ pub fn cmd_stop_inspect(source_path: &str, query: &str) -> Result<(), String> {
     }
 
     if matched_cluster_idxs.is_empty() {
-        if let Some(idxs) = snapshot.stop_cluster_idxs_by_name_upper.get(&query_upper) {
-            match_mode = "exact stop/station name";
-            matched_cluster_idxs = idxs.clone();
-        }
-    }
-
-    if matched_cluster_idxs.is_empty() {
-        if let Some(ids) = snapshot.stop_ids_by_name_upper.get(&query_upper) {
-            match_mode = "exact stop name";
-            matched_cluster_idxs = ids
-                .iter()
-                .filter_map(|stop_id| snapshot.stop_id_to_cluster_idx.get(stop_id).copied())
-                .collect();
-        }
-    }
-
-    if matched_cluster_idxs.is_empty() {
-        if let Some(name_upper) = fuzzy_best_key(
-            &query_upper,
-            snapshot.stop_cluster_idxs_by_name_upper.keys().cloned(),
+        let (matches, mode) = match_name_candidates(
+            &snapshot.stop_cluster_idxs_by_name_upper,
+            query,
             STOP_FUZZY_THRESHOLD,
-        ) {
-            matched_cluster_idxs = snapshot
-                .stop_cluster_idxs_by_name_upper
-                .get(&name_upper)
-                .cloned()
-                .unwrap_or_default();
-            match_mode = "fuzzy stop/station name";
-        }
+            &GENERIC_QUERY_TOKENS,
+            24,
+        );
+        matched_cluster_idxs = matches;
+        match_mode = match mode {
+            NameMatchMode::Exact => "exact stop/station name",
+            NameMatchMode::Fuzzy => "fuzzy stop/station name",
+            NameMatchMode::Relaxed => "relaxed stop/station name",
+            NameMatchMode::None => match_mode,
+        };
     }
 
     if matched_cluster_idxs.is_empty() {
-        // Fallback fuzzy on stop names if cluster names had no match.
-        if let Some(name_upper) = fuzzy_best_key(
-            &query_upper,
-            snapshot.stop_ids_by_name_upper.keys().cloned(),
+        // Secondary fallback: raw stop-name lookup maps to its containing station cluster.
+        let (stop_name_matches, mode) = match_name_candidates(
+            &snapshot.stop_ids_by_name_upper,
+            query,
             STOP_FUZZY_THRESHOLD,
-        ) {
-            matched_cluster_idxs = snapshot
-                .stop_ids_by_name_upper
-                .get(&name_upper)
-                .into_iter()
-                .flat_map(|ids| ids.iter())
-                .filter_map(|stop_id| snapshot.stop_id_to_cluster_idx.get(stop_id).copied())
-                .collect();
-            match_mode = "fuzzy stop name";
-        }
-    }
-
-    if matched_cluster_idxs.is_empty() {
-        // Final fallback: show a few human-friendly suggestions.
-        let mut suggestions: Vec<String> = snapshot
-            .stop_clusters
-            .iter()
-            .filter(|cluster| cluster.name.to_ascii_uppercase().starts_with(&query_upper))
-            .map(|cluster| cluster.name.clone())
+            &GENERIC_QUERY_TOKENS,
+            24,
+        );
+        matched_cluster_idxs = stop_name_matches
+            .into_iter()
+            .filter_map(|stop_id| snapshot.stop_id_to_cluster_idx.get(&stop_id).copied())
             .collect();
+        match_mode = match mode {
+            NameMatchMode::Exact => "exact stop name",
+            NameMatchMode::Fuzzy => "fuzzy stop name",
+            NameMatchMode::Relaxed => "relaxed stop name",
+            NameMatchMode::None => match_mode,
+        };
+    }
+
+    if matched_cluster_idxs.is_empty() {
+        let mut suggestions = relaxed_name_matches(
+            &snapshot.stop_cluster_idxs_by_name_upper,
+            query,
+            &GENERIC_QUERY_TOKENS,
+            5,
+        )
+        .into_iter()
+        .filter_map(|cluster_idx| snapshot.stop_clusters.get(cluster_idx as usize))
+        .map(|cluster| cluster.name.clone())
+        .collect::<Vec<_>>();
 
         if suggestions.is_empty() {
+            let normalized_query = normalize_for_match(query);
             suggestions = snapshot
                 .stop_clusters
                 .iter()
-                .filter(|cluster| cluster.name.to_ascii_uppercase().contains(&query_upper))
+                .filter(|cluster| normalize_for_match(&cluster.name).contains(&normalized_query))
                 .map(|cluster| cluster.name.clone())
                 .collect();
         }
 
         if suggestions.is_empty() {
+            let normalized_query = normalize_for_match(query);
             suggestions = snapshot
                 .stops
                 .iter()
-                .filter(|stop| stop.name.to_ascii_uppercase().contains(&query_upper))
+                .filter(|stop| normalize_for_match(&stop.name).contains(&normalized_query))
                 .map(|stop| stop.name.clone())
                 .collect();
         }
@@ -371,35 +366,13 @@ pub fn cmd_stop_inspect(source_path: &str, query: &str) -> Result<(), String> {
         };
 
         return Err(format!(
-            "No stops found for query '{query}'.\nSearched fields: cluster key, stop id, stop code, exact stop/station name, and high-confidence fuzzy stop/station name.\n{suggestion_text}\nExamples:\n  oeffi inspect \"Karlsplatz\"\n  oeffi inspect \"at:49:657:0:8\""
+            "No stops found for query '{query}'.\nSearched fields: cluster key, stop id, stop code, and route-style stop/station name matching.\n{suggestion_text}\nExamples:\n  oeffi inspect \"Karlsplatz\"\n  oeffi inspect \"at:49:657:0:8\""
         ));
     }
 
-    matched_cluster_idxs.sort();
-    matched_cluster_idxs.dedup();
-
-    // Rank matches by number of routes served at cluster level.
-    let mut ranked: Vec<(usize, u32)> = matched_cluster_idxs
-        .into_iter()
-        .filter_map(|cluster_idx| {
-            snapshot
-                .stop_clusters
-                .get(cluster_idx as usize)
-                .map(|cluster| {
-                    let route_count =
-                        collect_route_ids_for_cluster(cluster, &snapshot.route_ids_by_stop_id)
-                            .len();
-                    (route_count, cluster_idx)
-                })
-        })
-        .collect();
-
-    ranked.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.cmp(&b.1)));
-
-    let selected_cluster_idxs: Vec<u32> = ranked
-        .into_iter()
-        .map(|(_, cluster_idx)| cluster_idx)
-        .collect();
+    let mut seen_cluster_idxs: HashSet<u32> = HashSet::new();
+    matched_cluster_idxs.retain(|idx| seen_cluster_idxs.insert(*idx));
+    let selected_cluster_idxs = matched_cluster_idxs;
 
     let route_by_id: HashMap<&str, &crate::snapshot::RouteEntry> = snapshot
         .routes

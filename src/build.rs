@@ -206,6 +206,13 @@ pub fn build_snapshot(source_path: &str) -> Result<Snapshot, String> {
         });
     }
 
+    let mut cluster_name_by_stop_id: HashMap<String, String> = HashMap::new();
+    for cluster in &stop_clusters {
+        for stop_id in &cluster.member_stop_ids {
+            cluster_name_by_stop_id.insert(stop_id.clone(), cluster.name.clone());
+        }
+    }
+
     let mut route_stop_ids_by_name: HashMap<String, HashMap<String, HashSet<String>>> =
         HashMap::new();
     let mut representative_trip_names_by_route: HashMap<String, Vec<String>> = HashMap::new();
@@ -220,10 +227,10 @@ pub fn build_snapshot(source_path: &str) -> Result<Snapshot, String> {
         let mut seen_names: HashSet<String> = HashSet::new();
 
         for stop_time in &trip.stop_times {
-            let stop_name = stop_time
-                .stop
-                .name
-                .clone()
+            let stop_name = cluster_name_by_stop_id
+                .get(&stop_time.stop.id)
+                .cloned()
+                .or_else(|| stop_time.stop.name.clone())
                 .unwrap_or_else(|| format!("<unknown stop {}>", stop_time.stop.id));
 
             stop_ids_by_name

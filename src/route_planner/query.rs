@@ -1,6 +1,6 @@
 use std::cmp::Ordering;
 
-use crate::matcher::{exact_key_case_insensitive, fuzzy_best_key};
+use crate::matcher::{GENERIC_QUERY_TOKENS, exact_key_case_insensitive, match_name_candidates};
 use chrono::{Local, NaiveDate, Timelike};
 use raptor::Journey;
 use raptor::Timetable;
@@ -103,20 +103,15 @@ pub fn match_station_idxs(cache: &PlannerCache, query: &str) -> Vec<u32> {
     if let Some(v) = cache.station_idxs_by_code_upper.get(&query_upper) {
         return v.clone();
     }
-    if let Some(v) = cache.station_idxs_by_name_upper.get(&query_upper) {
-        return v.clone();
-    }
-
-    if let Some(name) = fuzzy_best_key(
-        &query_upper,
-        cache.station_idxs_by_name_upper.keys().cloned(),
+    let (matches, _) = match_name_candidates(
+        &cache.station_idxs_by_name_upper,
+        query,
         STOP_FUZZY_THRESHOLD,
-    ) {
-        return cache
-            .station_idxs_by_name_upper
-            .get(&name)
-            .cloned()
-            .unwrap_or_default();
+        &GENERIC_QUERY_TOKENS,
+        24,
+    );
+    if !matches.is_empty() {
+        return matches;
     }
 
     Vec::new()
@@ -785,6 +780,27 @@ mod tests {
     }
 
     #[test]
+    fn match_station_idxs_supports_partial_multi_word_queries() {
+        let mut cache = tiny_cache();
+        cache.stations[1].name = "Flughafen Wien Bahnhof".to_string();
+        cache.stations[2].name = "Wien Mitte-Landstraße".to_string();
+        cache.station_idxs_by_name_upper = HashMap::from([
+            ("A".to_string(), vec![0_u32]),
+            ("FLUGHAFEN WIEN BAHNHOF".to_string(), vec![1_u32]),
+            ("WIEN MITTE-LANDSTRASSE".to_string(), vec![2_u32]),
+        ]);
+
+        let matched = match_station_idxs(&cache, "flughafen");
+        assert_eq!(matched, vec![1_u32]);
+
+        let matched_mitte = match_station_idxs(&cache, "wien mitte");
+        assert_eq!(matched_mitte, vec![2_u32]);
+
+        let matched_generic = match_station_idxs(&cache, "wien");
+        assert!(matched_generic.is_empty());
+    }
+
+    #[test]
     fn active_services_apply_calendar_dates_overrides() {
         let mut cache = tiny_cache();
         cache.service_ids = vec!["svc".to_string()];
@@ -822,8 +838,15 @@ mod tests {
         ensure_combined_source_ready(DEFAULT_GTFS_PATH).expect("combined source ready");
         let cache = super::super::cache::load_or_build_planner_cache(DEFAULT_GTFS_PATH)
             .expect("planner cache");
-        let result =
-            plan_route(&cache, "Herrengasse", "Praterstern", 1, None, None).expect("route exists");
+        let result = plan_route(
+            &cache,
+            "Herrengasse",
+            "Praterstern",
+            1,
+            Some(8 * 3600),
+            Some(NaiveDate::from_ymd_opt(2026, 1, 15).expect("date")),
+        )
+        .expect("route exists");
         assert!(!result.chosen_legs.is_empty());
     }
 }

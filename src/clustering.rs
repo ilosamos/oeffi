@@ -34,8 +34,22 @@ fn station_stem_from_stop_id(stop_id: &str) -> Option<String> {
     Some(format!("{country}:{region}:{station}"))
 }
 
-fn simplify_station_name(name: &str) -> String {
-    name.strip_prefix("Wien ").unwrap_or(name).to_string()
+fn station_core_from_stop_id(stop_id: &str) -> Option<String> {
+    let mut parts = stop_id.split(':');
+    let (_prefix, Some(region), Some(station)) = (parts.next(), parts.next(), parts.next()) else {
+        return None;
+    };
+
+    if region.is_empty() || station.is_empty() {
+        return None;
+    }
+
+    Some(format!("{region}:{station}"))
+}
+
+fn cluster_display_name(name: &str) -> String {
+    // Keep canonical station names for output and matching (e.g. "Wien Mitte-Landstraße").
+    name.trim().to_string()
 }
 
 pub fn stop_cluster_key(
@@ -43,11 +57,10 @@ pub fn stop_cluster_key(
     stop_name: &str,
     parent_station: Option<&str>,
     parent_station_ids: &HashSet<String>,
+    parent_station_id_by_core: &HashMap<String, String>,
 ) -> String {
-    if let Some(station_stem) = station_stem_from_stop_id(stop_id) {
-        return format!("stem::{station_stem}");
-    }
-
+    // Parent-based clustering must win over stem-based clustering so parent and child stop IDs
+    // (e.g. Pat:* + at:* variants in OeBB) end up in the same logical station cluster.
     if let Some(parent_id) = parent_station {
         if !parent_id.is_empty() {
             return format!("parent::{parent_id}");
@@ -56,6 +69,16 @@ pub fn stop_cluster_key(
 
     if parent_station_ids.contains(stop_id) {
         return format!("parent::{stop_id}");
+    }
+
+    if let Some(core) = station_core_from_stop_id(stop_id) {
+        if let Some(parent_id) = parent_station_id_by_core.get(&core) {
+            return format!("parent::{parent_id}");
+        }
+    }
+
+    if let Some(station_stem) = station_stem_from_stop_id(stop_id) {
+        return format!("stem::{station_stem}");
     }
 
     if !stop_name.is_empty() {
@@ -73,6 +96,19 @@ pub fn build_stop_clusters<T: ClusterStopAccessor>(
         .iter()
         .filter_map(|stop| stop.parent_station().map(|id| id.to_string()))
         .collect();
+    let mut parent_station_id_by_core: HashMap<String, String> = HashMap::new();
+    for parent_id in &parent_station_ids {
+        if let Some(core) = station_core_from_stop_id(parent_id) {
+            parent_station_id_by_core
+                .entry(core)
+                .and_modify(|existing| {
+                    if parent_id < existing {
+                        *existing = parent_id.clone();
+                    }
+                })
+                .or_insert_with(|| parent_id.clone());
+        }
+    }
 
     let mut clusters: Vec<StopClusterDef> = Vec::new();
     let mut cluster_idx_by_key: HashMap<String, u32> = HashMap::new();
@@ -83,6 +119,7 @@ pub fn build_stop_clusters<T: ClusterStopAccessor>(
             stop.name(),
             stop.parent_station(),
             &parent_station_ids,
+            &parent_station_id_by_core,
         );
 
         let cluster_idx = if let Some(existing) = cluster_idx_by_key.get(&cluster_key).copied() {
@@ -92,10 +129,10 @@ pub fn build_stop_clusters<T: ClusterStopAccessor>(
                 stop_idx_by_id
                     .get(parent_id)
                     .and_then(|idx| stops.get(*idx as usize))
-                    .map(|parent| simplify_station_name(parent.name()))
-                    .unwrap_or_else(|| simplify_station_name(stop.name()))
+                    .map(|parent| cluster_display_name(parent.name()))
+                    .unwrap_or_else(|| cluster_display_name(stop.name()))
             } else {
-                simplify_station_name(stop.name())
+                cluster_display_name(stop.name())
             };
 
             let new_idx = clusters.len() as u32;
@@ -130,5 +167,38 @@ pub fn build_stop_clusters<T: ClusterStopAccessor>(
         clusters,
         cluster_idx_by_key,
         cluster_idxs_by_name_upper,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::{HashMap, HashSet};
+
+    use super::stop_cluster_key;
+
+    #[test]
+    fn stop_cluster_key_prefers_parent_station_over_stem() {
+        let key = stop_cluster_key(
+            "at:49:743:0:1",
+            "Wien Mitte-Landstraße",
+            Some("Pat:49:743"),
+            &HashSet::new(),
+            &HashMap::new(),
+        );
+        assert_eq!(key, "parent::Pat:49:743");
+    }
+
+    #[test]
+    fn stop_cluster_key_uses_parent_core_mapping_for_stem_only_stop() {
+        let mut by_core = HashMap::new();
+        by_core.insert("49:743".to_string(), "Pat:49:743".to_string());
+        let key = stop_cluster_key(
+            "at:49:743:0:4",
+            "Mitte-Landstraße",
+            None,
+            &HashSet::new(),
+            &by_core,
+        );
+        assert_eq!(key, "parent::Pat:49:743");
     }
 }
