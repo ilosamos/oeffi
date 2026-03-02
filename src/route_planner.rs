@@ -38,6 +38,7 @@ pub fn cmd_route_plan(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn cmd_route_plan_coords(
     config: &AppConfig,
     from_lat: f64,

@@ -356,14 +356,14 @@ pub fn cmd_stop_inspect(config: &AppConfig, query: &str) -> Result<(), String> {
         }
     }
 
-    if matched_cluster_idxs.is_empty() {
-        if let Some(ids) = snapshot.stop_ids_by_code_upper.get(&query_upper) {
-            match_mode = "exact stop code";
-            matched_cluster_idxs = ids
-                .iter()
-                .filter_map(|stop_id| snapshot.stop_id_to_cluster_idx.get(stop_id).copied())
-                .collect();
-        }
+    if matched_cluster_idxs.is_empty()
+        && let Some(ids) = snapshot.stop_ids_by_code_upper.get(&query_upper)
+    {
+        match_mode = "exact stop code";
+        matched_cluster_idxs = ids
+            .iter()
+            .filter_map(|stop_id| snapshot.stop_id_to_cluster_idx.get(stop_id).copied())
+            .collect();
     }
 
     if matched_cluster_idxs.is_empty() {
@@ -511,11 +511,11 @@ pub fn cmd_config_list(loaded: &LoadedConfig) -> Result<(), String> {
     for key in config_keys() {
         let value = get_config_value(&loaded.effective_config, key)
             .ok_or_else(|| format!("Missing config key '{key}'"))?;
-        if let Some(env_name) = env_var_for_key(key) {
-            if loaded.env_overrides.contains(env_name) {
-                println!("{key}={value}  (env: {env_name})");
-                continue;
-            }
+        if let Some(env_name) = env_var_for_key(key)
+            && loaded.env_overrides.contains(env_name)
+        {
+            println!("{key}={value}  (env: {env_name})");
+            continue;
         }
         println!("{key}={value}");
     }
@@ -563,10 +563,10 @@ pub fn cmd_config_set(loaded: &LoadedConfig, key: &str, value: &str) -> Result<(
     }
 
     println!("Updated '{key}' in {}", loaded.paths.config_path.display());
-    if let Some(env_name) = env_var_for_key(key) {
-        if loaded.env_overrides.contains(env_name) {
-            println!("Note: currently overridden by env var {env_name}");
-        }
+    if let Some(env_name) = env_var_for_key(key)
+        && loaded.env_overrides.contains(env_name)
+    {
+        println!("Note: currently overridden by env var {env_name}");
     }
     Ok(())
 }

@@ -14,7 +14,7 @@ mod snapshot;
 use std::env;
 use std::process::ExitCode;
 
-use cli::{Command, is_help_error, parse_command, render_help};
+use cli::{APP_VERSION, Command, is_help_error, parse_command, render_help};
 use config::load_or_init_config;
 
 fn run(command: Command) -> ExitCode {
@@ -80,6 +80,10 @@ fn run(command: Command) -> ExitCode {
         Command::ConfigList => commands::cmd_config_list(&loaded),
         Command::ConfigGet { key } => commands::cmd_config_get(&loaded, &key),
         Command::ConfigSet { key, value } => commands::cmd_config_set(&loaded, &key, &value),
+        Command::Version => {
+            println!("oeffi {APP_VERSION}");
+            Ok(())
+        }
         Command::Help => {
             print!("{}", render_help());
             Ok(())

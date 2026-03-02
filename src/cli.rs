@@ -3,6 +3,8 @@ use std::iter;
 use chrono::NaiveDate;
 use clap::{CommandFactory, Parser, Subcommand, error::ErrorKind};
 
+pub const APP_VERSION: &str = env!("CARGO_PKG_VERSION");
+
 #[derive(Debug)]
 pub enum Command {
     Summary,
@@ -48,6 +50,7 @@ pub enum Command {
         key: String,
         value: String,
     },
+    Version,
     Help,
 }
 
@@ -55,6 +58,7 @@ pub enum Command {
 #[command(
     name = "oeffi",
     about = "Wien Öffi CLI",
+    version = APP_VERSION,
     disable_help_subcommand = true,
     next_line_help = true,
     after_help = "Examples:
@@ -71,6 +75,7 @@ pub enum Command {
   oeffi cache-build
   oeffi cache-build --download
   oeffi init
+  oeffi version
   oeffi config list
   oeffi config get merged_gtfs_path
   oeffi config set planner_cache_path /tmp/planner.cache.bin"
@@ -142,6 +147,8 @@ enum CliCommand {
         #[command(subcommand)]
         command: ConfigSubcommand,
     },
+    #[command(about = "Print version")]
+    Version,
     #[command(about = "Show high-level GTFS dataset stats")]
     Summary,
     #[command(about = "Show help message")]
@@ -270,6 +277,7 @@ pub fn parse_command(args: &[String]) -> Result<Command, clap::Error> {
             ConfigSubcommand::Get { key } => Command::ConfigGet { key },
             ConfigSubcommand::Set { key, value } => Command::ConfigSet { key, value },
         },
+        Some(CliCommand::Version) => Command::Version,
         Some(CliCommand::Summary) => Command::Summary,
         Some(CliCommand::Help) | None => Command::Help,
     })
@@ -437,6 +445,11 @@ mod tests {
             Command::ConfigSet { key, value }
             if key == "merged_gtfs_path" && value == "/tmp/gtfs"
         ));
+    }
+
+    #[test]
+    fn parses_version() {
+        assert!(matches!(parse_to_command(&["version"]), Command::Version));
     }
 
     #[test]

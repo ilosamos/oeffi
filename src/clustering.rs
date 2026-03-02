@@ -61,20 +61,20 @@ pub fn stop_cluster_key(
 ) -> String {
     // Parent-based clustering must win over stem-based clustering so parent and child stop IDs
     // (e.g. Pat:* + at:* variants in OeBB) end up in the same logical station cluster.
-    if let Some(parent_id) = parent_station {
-        if !parent_id.is_empty() {
-            return format!("parent::{parent_id}");
-        }
+    if let Some(parent_id) = parent_station
+        && !parent_id.is_empty()
+    {
+        return format!("parent::{parent_id}");
     }
 
     if parent_station_ids.contains(stop_id) {
         return format!("parent::{stop_id}");
     }
 
-    if let Some(core) = station_core_from_stop_id(stop_id) {
-        if let Some(parent_id) = parent_station_id_by_core.get(&core) {
-            return format!("parent::{parent_id}");
-        }
+    if let Some(core) = station_core_from_stop_id(stop_id)
+        && let Some(parent_id) = parent_station_id_by_core.get(&core)
+    {
+        return format!("parent::{parent_id}");
     }
 
     if let Some(station_stem) = station_stem_from_stop_id(stop_id) {

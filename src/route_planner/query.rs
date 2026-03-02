@@ -396,6 +396,7 @@ pub fn plan_route(
     })
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn plan_route_from_coords(
     cache: &PlannerCache,
     from_lat: f64,

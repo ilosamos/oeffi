@@ -1,56 +1,49 @@
-# oeffi - Wiener Öffi CLI
+# oeffi - Wiener Linien Öffi CLI
 
-A Rust cli for planning transit "Öffi" routes in Vienna. Runs fast and local, optimized to be usable by agents like openclaw. Uses both Wiener Linien and ÖBB data.
+Fast local CLI for Vienna transit routing using Wiener Linien + ÖBB GTFS data.
 
 ## TL;DR
 
 ```bash
-oeffi init # one time download data and building cache
+# first run (download data and build cache)
+oeffi init
+
+# route by station names
 oeffi route "Karlsplatz" "Praterstern"
+
+# route with date/time
 oeffi route "Herrengasse" "Praterstern" --date 2026-03-02 --depart 08:15
+
+# route by coordinates
 oeffi route-coords 48.2066 16.3707 48.1850 16.3747
 ```
 
-## Features
+## Why oeffi
 
-- Fast local execution with on-disk caches
-- Local-first workflow (no external API needed for planning)
-- Human-readable CLI output
-- Agent/script-friendly command interface (works well in tool pipelines, including OpenCode/OpenClaw-style agents)
-- Configurable paths and data source URLs
+- Fast: local caches, no external planner API
+- Local-first: works from downloaded GTFS files
+- Readable: terminal output optimized for humans
+- Agent-friendly: simple commands and config access for automation
 
-## Data sources
+## Install
 
-- Wiener Linien GTFS
-  - Info page: `https://www.data.gv.at/datasets/ab4a73b6-1c2d-42e1-b4d9-049e04889cf0?locale=de`
-  - ZIP: `http://www.wienerlinien.at/ogd_realtime/doku/ogd/gtfs/gtfs.zip`
-- ÖBB GTFS
-  - Info page: `https://data.oebb.at/de/datensaetze~soll-fahrplan-gtfs~`
-  - ZIP: `https://static.web.oebb.at/open-data/soll-fahrplan-gtfs/GTFS_Fahrplan_2026.zip`
+### From GitHub Releases
 
-The merged dataset keeps:
-
-- Wiener Linien feed (full)
-- ÖBB stops around Vienna and commuter rail routes (`S*`, `REX*`, `R*`)
-
-## Quick start
-
-Build and run:
+Download the archive for your platform, extract it, and place `oeffi` on your `PATH`.
 
 ```bash
-oeffi init
+VERSION=0.1.0
+curl -L -o oeffi.tar.gz "https://github.com/ilosamos/oeffi/releases/download/v${VERSION}/oeffi-${VERSION}-x86_64-unknown-linux-gnu.tar.gz"
+tar -xzf oeffi.tar.gz
+sudo install -m 755 oeffi-${VERSION}-x86_64-unknown-linux-gnu/oeffi /usr/local/bin/oeffi
+oeffi version
 ```
 
-This will:
-
-1. Download raw GTFS data
-2. Preprocess/merge sources
-3. Build snapshot and planner caches
-
-Then try:
+### From source
 
 ```bash
-oeffi route "Karlsplatz" "Praterstern"
+cargo build --release
+./target/release/oeffi version
 ```
 
 ## Common commands
@@ -61,20 +54,62 @@ oeffi routes
 oeffi stops
 oeffi inspect "Karlsplatz"
 oeffi line U1
-oeffi route "Herrengasse" "Praterstern" --date 2026-03-02 --depart 08:15
-oeffi route-coords 48.2066 16.3707 48.1850 16.3747
-```
-
-Cache and setup:
-
-```bash
 oeffi cache-build
 oeffi cache-build --download
 oeffi init
 oeffi init --force
+oeffi config list
 ```
 
-## Config
+## First run and updates
+
+- `oeffi init`: download raw data, merge feeds, build caches
+- `oeffi init --force`: same as above, but overwrites existing raw data
+- `oeffi cache-build --download`: refresh raw data and rebuild caches
+
+If local source data is missing, the CLI suggests running `init` or `cache-build --download`.
+
+## Compatibility
+
+- macOS Intel: `x86_64-apple-darwin`
+- macOS Apple Silicon: `aarch64-apple-darwin`
+- Linux x86_64: `x86_64-unknown-linux-gnu`
+- No Windows artifacts currently
+
+## Limitations
+
+- No geocoding for arbitrary addresses yet
+- No realtime outage/delay integration yet
+- Local GTFS data can become stale and should be refreshed regularly
+- Merge/build logic assumes current GTFS structure
+
+## Data sources
+
+- Wiener Linien GTFS
+  - Info: `https://www.data.gv.at/datasets/ab4a73b6-1c2d-42e1-b4d9-049e04889cf0?locale=de`
+  - ZIP: `http://www.wienerlinien.at/ogd_realtime/doku/ogd/gtfs/gtfs.zip`
+- ÖBB GTFS
+  - Info: `https://data.oebb.at/de/datensaetze~soll-fahrplan-gtfs~`
+  - ZIP: `https://static.web.oebb.at/open-data/soll-fahrplan-gtfs/GTFS_Fahrplan_2026.zip`
+
+Merged dataset includes Wiener Linien feed plus scoped ÖBB commuter rail data around Vienna.
+
+## Release artifacts
+
+Each release includes:
+
+- `oeffi-<version>-x86_64-apple-darwin.tar.gz`
+- `oeffi-<version>-aarch64-apple-darwin.tar.gz`
+- `oeffi-<version>-x86_64-unknown-linux-gnu.tar.gz`
+- `SHA256SUMS.txt`
+
+Verify:
+
+```bash
+shasum -a 256 -c SHA256SUMS.txt
+```
+
+Config details
 
 The CLI stores config as JSON and supports env overrides.
 
@@ -109,38 +144,17 @@ Environment overrides:
 - `OEFFI_WIENER_LINIEN_GTFS_URL`
 - `OEFFI_OEBB_GTFS_URL`
 
-## Where files are stored
+By default paths are resolved using OS app directories (`directories::ProjectDirs`).
 
-By default, paths are resolved via OS app directories (`directories::ProjectDirs`):
 
-- config JSON in the app config directory
-- raw GTFS source data in the app data directory
-- cache files in the app cache directory
-
-Use `oeffi config list` to see the effective paths on your machine.
-
-## Cache behavior
-
-- Snapshot cache: used for summary/list/inspect/line commands
-- Planner cache: used for route planning
-- If caches are stale or missing, they are rebuilt automatically
-
-## Notes
-
-- Route planning uses `calendar.txt` and `calendar_dates.txt` for service-day activation.
-- `init --force` is a safety-gated overwrite for existing raw data.
-
-## Limitations
-
-- No geocoding yet: arbitrary street addresses are not supported (use stop names/ids or coordinates).
-- No realtime integration: service outages, delays, and disruptions are not reflected.
-- Local GTFS data can become stale and should be refreshed periodically (`cache-build --download`).
-- Merge/build logic assumes current GTFS file/column structure; upstream schema changes can break ingestion.
 
 ## TODO
 
-- Add geocoding support for arbitrary addresses.
-- Add realtime data integration (outages, delays, disruptions).
-- Add staleness checks/reminders and a smoother refresh workflow for outdated local data.
-- Make ingestion/merge pipeline more robust against GTFS schema and format changes.
+- Add geocoding support for arbitrary addresses
+- Add realtime data integration (outages, delays, disruptions)
+- Add better stale-data checks and refresh reminders
+- Improve resilience against GTFS schema changes
 
+## License
+
+This project is licensed under the terms in [LICENSE](LICENSE).

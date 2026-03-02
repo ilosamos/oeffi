@@ -258,14 +258,14 @@ pub(crate) fn build_planner_cache(source_path: &str) -> Result<PlannerCache, Str
             let arr = arr as usize;
             let dep = dep as usize;
 
-            if let Some(last_station) = station_pattern.last().copied() {
-                if last_station == station_idx {
-                    if let Some(last_times) = times.last_mut() {
-                        last_times.0 = last_times.0.min(arr);
-                        last_times.1 = last_times.1.max(dep);
-                    }
-                    continue;
+            if let Some(last_station) = station_pattern.last().copied()
+                && last_station == station_idx
+            {
+                if let Some(last_times) = times.last_mut() {
+                    last_times.0 = last_times.0.min(arr);
+                    last_times.1 = last_times.1.max(dep);
                 }
+                continue;
             }
 
             station_pattern.push(station_idx);

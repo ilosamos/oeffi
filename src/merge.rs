@@ -272,10 +272,10 @@ fn load_oebb_scoped_stops(oebb_source: &str) -> Result<(Vec<OebbStop>, StopScope
     // Keep parent stations for scoped child stops so clustering can still group platforms.
     let mut extra_parent_ids: Vec<String> = Vec::new();
     for stop_id in &scoped_stop_ids {
-        if let Some(stop) = all_stops.get(stop_id) {
-            if !stop.parent_station.is_empty() {
-                extra_parent_ids.push(stop.parent_station.clone());
-            }
+        if let Some(stop) = all_stops.get(stop_id)
+            && !stop.parent_station.is_empty()
+        {
+            extra_parent_ids.push(stop.parent_station.clone());
         }
     }
     for parent_id in extra_parent_ids {
@@ -303,6 +303,13 @@ struct TripStopCounts {
     vienna_count: u16,
     scoped_count: u16,
 }
+
+type SelectedOebbTrips = (
+    Vec<OebbTrip>,
+    HashSet<String>,
+    HashSet<String>,
+    HashSet<String>,
+);
 
 fn count_oebb_stops_per_trip(
     oebb_source: &str,
@@ -345,15 +352,7 @@ fn select_oebb_trips(
     oebb_source: &str,
     routes_by_id: &HashMap<String, OebbRoute>,
     counts_by_trip: &HashMap<String, TripStopCounts>,
-) -> Result<
-    (
-        Vec<OebbTrip>,
-        HashSet<String>,
-        HashSet<String>,
-        HashSet<String>,
-    ),
-    String,
-> {
+) -> Result<SelectedOebbTrips, String> {
     let path = path_for(oebb_source, TRIPS_FILE);
     let mut rdr = csv_reader(&path)?;
     let headers = rdr
