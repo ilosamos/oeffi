@@ -74,6 +74,14 @@ fn significant_query_tokens<'a>(
         .collect()
 }
 
+fn remove_generic_tokens(normalized_value: &str, generic_tokens: &[&str]) -> String {
+    normalized_value
+        .split_whitespace()
+        .filter(|token| !generic_tokens.contains(token))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 fn contains_token_match(normalized_name: &str, query_tokens: &[&str]) -> bool {
     if query_tokens.is_empty() || query_tokens.iter().all(|token| token.len() < 2) {
         return false;
@@ -170,6 +178,30 @@ pub fn match_name_candidates<T: Clone + Ord>(
         return (v.clone(), NameMatchMode::Exact);
     }
 
+    let normalized_query = normalize_for_match(query);
+    let normalized_query_without_generic = remove_generic_tokens(&normalized_query, generic_tokens);
+    if !normalized_query_without_generic.is_empty() {
+        let mut normalized_exact_matches: Vec<T> = name_idxs_by_name_upper
+            .iter()
+            .filter_map(|(name_upper, idxs)| {
+                let normalized_name = normalize_for_match(name_upper);
+                let normalized_name_without_generic =
+                    remove_generic_tokens(&normalized_name, generic_tokens);
+                if normalized_name_without_generic == normalized_query_without_generic {
+                    Some(idxs.clone())
+                } else {
+                    None
+                }
+            })
+            .flatten()
+            .collect();
+        normalized_exact_matches.sort();
+        normalized_exact_matches.dedup();
+        if !normalized_exact_matches.is_empty() {
+            return (normalized_exact_matches, NameMatchMode::Exact);
+        }
+    }
+
     if let Some(name) = fuzzy_best_key(
         &query_upper,
         name_idxs_by_name_upper.keys().cloned(),
@@ -239,5 +271,17 @@ mod tests {
             match_name_candidates(&name_index, "landstrasse", 0.94, &GENERIC_QUERY_TOKENS, 10);
         assert_eq!(matches, vec![2_u32]);
         assert_eq!(mode, NameMatchMode::Relaxed);
+    }
+
+    #[test]
+    fn match_name_candidates_prefers_generic_stripped_exact_match() {
+        let name_index = HashMap::from([
+            ("WIEN WESTBAHNHOF".to_string(), vec![1_u32]),
+            ("WESTBAHNHOF GERSTNERSTRASSE".to_string(), vec![2_u32]),
+        ]);
+        let (matches, mode) =
+            match_name_candidates(&name_index, "westbahnhof", 0.94, &GENERIC_QUERY_TOKENS, 10);
+        assert_eq!(matches, vec![1_u32]);
+        assert_eq!(mode, NameMatchMode::Exact);
     }
 }

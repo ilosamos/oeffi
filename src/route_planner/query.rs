@@ -849,4 +849,31 @@ mod tests {
         .expect("route exists");
         assert!(!result.chosen_legs.is_empty());
     }
+
+    #[test]
+    fn praterstern_westbahnhof_regression_if_dataset_available() {
+        if !Path::new("data/wiener-linien/stops.txt").exists()
+            || !Path::new("data/oebb/stops.txt").exists()
+        {
+            return;
+        }
+
+        ensure_combined_source_ready(DEFAULT_GTFS_PATH).expect("combined source ready");
+        let cache = super::super::cache::load_or_build_planner_cache(DEFAULT_GTFS_PATH)
+            .expect("planner cache");
+        let result = plan_route(
+            &cache,
+            "praterstern",
+            "westbahnhof",
+            1,
+            Some(8 * 3600),
+            Some(NaiveDate::from_ymd_opt(2026, 1, 15).expect("date")),
+        )
+        .expect("route exists");
+        let to_name = &cache.stations[result.chosen_to_idx as usize].name;
+        assert!(
+            to_name.contains("Westbahnhof") && !to_name.contains("Gerstnerstraße"),
+            "unexpected destination station name: {to_name}"
+        );
+    }
 }
