@@ -30,3 +30,4 @@ serde_json = "1.0"
 directories = "5.0"
 ureq = { version = "2.10", default-features = false, features = ["tls"] }
 zip = { version = "0.6", default-features = false, features = ["deflate"] }
+openssl-sys = { version = "0.9", features = ["vendored"] }
