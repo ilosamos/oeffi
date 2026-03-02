@@ -67,6 +67,22 @@ pub fn cmd_list_routes(source_path: &str) -> Result<(), String> {
     Ok(())
 }
 
+pub fn cmd_list_stops(source_path: &str) -> Result<(), String> {
+    ensure_combined_source_ready(source_path)?;
+    let snapshot = load_or_build_snapshot(source_path, DEFAULT_CACHE_PATH)?;
+
+    println!(
+        "Clustered stops in {source_path} ({} total, via cache: {DEFAULT_CACHE_PATH}):",
+        snapshot.stop_clusters.len()
+    );
+
+    for cluster in &snapshot.stop_clusters {
+        println!("  {} | {}", cluster.name, cluster.key);
+    }
+
+    Ok(())
+}
+
 pub fn cmd_route_stops(source_path: &str, route_name: &str) -> Result<(), String> {
     ensure_combined_source_ready(source_path)?;
     let snapshot = load_or_build_snapshot(source_path, DEFAULT_CACHE_PATH)?;

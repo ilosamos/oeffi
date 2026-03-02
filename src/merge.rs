@@ -10,7 +10,12 @@ use crate::cli::DEFAULT_GTFS_PATH;
 const WIENER_LINIEN_SOURCE: &str = "data/wiener-linien";
 const OEBB_SOURCE: &str = "data/oebb";
 const META_FILE: &str = ".merge_fingerprint";
-const MERGE_SCHEMA_VERSION: u32 = 2;
+const MERGE_SCHEMA_VERSION: u32 = 3;
+
+const VIENNA_CENTER_LAT: f64 = 48.2082;
+const VIENNA_CENTER_LON: f64 = 16.3738;
+const NEAR_VIENNA_RADIUS_METERS: f64 = 60_000.0;
+const EARTH_RADIUS_METERS: f64 = 6_371_000.0;
 
 const AGENCY_FILE: &str = "agency.txt";
 const ROUTES_FILE: &str = "routes.txt";
@@ -62,6 +67,11 @@ struct OebbStop {
     platform_code: String,
 }
 
+struct StopScope {
+    scoped_stop_ids: HashSet<String>,
+    vienna_stop_ids: HashSet<String>,
+}
+
 fn path_for(source_root: &str, file_name: &str) -> PathBuf {
     Path::new(source_root).join(file_name)
 }
@@ -69,6 +79,33 @@ fn path_for(source_root: &str, file_name: &str) -> PathBuf {
 fn prefixed_oebb_id(id: &str) -> String {
     // Namespace ÖBB ids so they never collide with Wiener Linien ids.
     format!("oebb:{id}")
+}
+
+fn haversine_meters(lat1: f64, lon1: f64, lat2: f64, lon2: f64) -> f64 {
+    let dlat = (lat2 - lat1).to_radians();
+    let dlon = (lon2 - lon1).to_radians();
+    let lat1 = lat1.to_radians();
+    let lat2 = lat2.to_radians();
+
+    let a = (dlat / 2.0).sin().powi(2) + lat1.cos() * lat2.cos() * (dlon / 2.0).sin().powi(2);
+    let c = 2.0 * a.sqrt().atan2((1.0 - a).sqrt());
+    EARTH_RADIUS_METERS * c
+}
+
+fn parse_coord(value: &str) -> Option<f64> {
+    value.parse::<f64>().ok()
+}
+
+fn stop_in_scope(stop_id: &str, stop_lat: &str, stop_lon: &str) -> bool {
+    if stop_id.starts_with("at:49:") {
+        return true;
+    }
+
+    let (Some(lat), Some(lon)) = (parse_coord(stop_lat), parse_coord(stop_lon)) else {
+        return false;
+    };
+
+    haversine_meters(VIENNA_CENTER_LAT, VIENNA_CENTER_LON, lat, lon) <= NEAR_VIENNA_RADIUS_METERS
 }
 
 fn header_index(headers: &StringRecord, name: &str) -> Result<usize, String> {
@@ -166,7 +203,7 @@ fn load_oebb_routes() -> Result<HashMap<String, OebbRoute>, String> {
     Ok(routes)
 }
 
-fn load_oebb_vienna_stops() -> Result<(Vec<OebbStop>, HashSet<String>), String> {
+fn load_oebb_scoped_stops() -> Result<(Vec<OebbStop>, StopScope), String> {
     let path = path_for(OEBB_SOURCE, STOPS_FILE);
     let mut rdr = csv_reader(&path)?;
     let headers = rdr
@@ -184,18 +221,18 @@ fn load_oebb_vienna_stops() -> Result<(Vec<OebbStop>, HashSet<String>), String> 
     let level_id_idx = header_index(&headers, "level_id")?;
     let platform_code_idx = header_index(&headers, "platform_code")?;
 
-    let mut stops = Vec::new();
-    let mut stop_ids = HashSet::new();
+    let mut all_stops: HashMap<String, OebbStop> = HashMap::new();
+    let mut scoped_stop_ids: HashSet<String> = HashSet::new();
+    let mut vienna_stop_ids: HashSet<String> = HashSet::new();
 
     for rec in rdr.records() {
         let rec = rec.map_err(|err| format!("Failed reading '{}': {err}", path.display()))?;
         let stop_id = rec.get(stop_id_idx).unwrap_or_default().to_string();
-        if !stop_id.starts_with("at:49:") {
+        if stop_id.is_empty() {
             continue;
         }
 
-        stop_ids.insert(stop_id.clone());
-        stops.push(OebbStop {
+        let stop = OebbStop {
             stop_id,
             stop_name: rec.get(stop_name_idx).unwrap_or_default().to_string(),
             stop_lat: rec.get(stop_lat_idx).unwrap_or_default().to_string(),
@@ -205,15 +242,53 @@ fn load_oebb_vienna_stops() -> Result<(Vec<OebbStop>, HashSet<String>), String> 
             parent_station: rec.get(parent_station_idx).unwrap_or_default().to_string(),
             level_id: rec.get(level_id_idx).unwrap_or_default().to_string(),
             platform_code: rec.get(platform_code_idx).unwrap_or_default().to_string(),
-        });
+        };
+
+        if stop.stop_id.starts_with("at:49:") {
+            vienna_stop_ids.insert(stop.stop_id.clone());
+        }
+        if stop_in_scope(&stop.stop_id, &stop.stop_lat, &stop.stop_lon) {
+            scoped_stop_ids.insert(stop.stop_id.clone());
+        }
+        all_stops.insert(stop.stop_id.clone(), stop);
     }
 
-    Ok((stops, stop_ids))
+    // Keep parent stations for scoped child stops so clustering can still group platforms.
+    let mut extra_parent_ids: Vec<String> = Vec::new();
+    for stop_id in &scoped_stop_ids {
+        if let Some(stop) = all_stops.get(stop_id) {
+            if !stop.parent_station.is_empty() {
+                extra_parent_ids.push(stop.parent_station.clone());
+            }
+        }
+    }
+    for parent_id in extra_parent_ids {
+        if all_stops.contains_key(&parent_id) {
+            scoped_stop_ids.insert(parent_id);
+        }
+    }
+
+    let mut scoped_stops: Vec<OebbStop> = scoped_stop_ids
+        .iter()
+        .filter_map(|id| all_stops.get(id).cloned())
+        .collect();
+    scoped_stops.sort_by(|a, b| a.stop_id.cmp(&b.stop_id));
+
+    Ok((
+        scoped_stops,
+        StopScope {
+            scoped_stop_ids,
+            vienna_stop_ids,
+        },
+    ))
 }
 
-fn count_oebb_vienna_stops_per_trip(
-    vienna_stop_ids: &HashSet<String>,
-) -> Result<HashMap<String, u16>, String> {
+struct TripStopCounts {
+    vienna_count: u16,
+    scoped_count: u16,
+}
+
+fn count_oebb_stops_per_trip(scope: &StopScope) -> Result<HashMap<String, TripStopCounts>, String> {
     let path = path_for(OEBB_SOURCE, STOP_TIMES_FILE);
     let mut rdr = csv_reader(&path)?;
     let headers = rdr
@@ -224,29 +299,32 @@ fn count_oebb_vienna_stops_per_trip(
     let trip_id_idx = header_index(&headers, "trip_id")?;
     let stop_id_idx = header_index(&headers, "stop_id")?;
 
-    let mut counts: HashMap<String, u16> = HashMap::new();
+    let mut counts: HashMap<String, TripStopCounts> = HashMap::new();
     for rec in rdr.records() {
         let rec = rec.map_err(|err| format!("Failed reading '{}': {err}", path.display()))?;
         let stop_id = rec.get(stop_id_idx).unwrap_or_default();
-        if !vienna_stop_ids.contains(stop_id) {
-            continue;
-        }
-
         let trip_id = rec.get(trip_id_idx).unwrap_or_default();
         if trip_id.is_empty() {
             continue;
         }
 
-        let entry = counts.entry(trip_id.to_string()).or_insert(0);
-        *entry = entry.saturating_add(1);
+        let entry = counts.entry(trip_id.to_string()).or_insert(TripStopCounts {
+            vienna_count: 0,
+            scoped_count: 0,
+        });
+        if scope.scoped_stop_ids.contains(stop_id) {
+            entry.scoped_count = entry.scoped_count.saturating_add(1);
+        }
+        if scope.vienna_stop_ids.contains(stop_id) {
+            entry.vienna_count = entry.vienna_count.saturating_add(1);
+        }
     }
-
     Ok(counts)
 }
 
 fn select_oebb_trips(
     routes_by_id: &HashMap<String, OebbRoute>,
-    vienna_counts_by_trip: &HashMap<String, u16>,
+    counts_by_trip: &HashMap<String, TripStopCounts>,
 ) -> Result<
     (
         Vec<OebbTrip>,
@@ -295,9 +373,11 @@ fn select_oebb_trips(
             continue;
         }
 
-        // Ignore through-trips that only touch a single Vienna stop.
-        let vienna_stop_count = vienna_counts_by_trip.get(trip_id).copied().unwrap_or(0);
-        if vienna_stop_count < 2 {
+        let counts = counts_by_trip.get(trip_id);
+        let scoped_count = counts.map(|c| c.scoped_count).unwrap_or(0);
+        let vienna_count = counts.map(|c| c.vienna_count).unwrap_or(0);
+        // Keep trips that actually connect Vienna with nearby regional stops.
+        if vienna_count < 1 || scoped_count < 2 {
             continue;
         }
 
@@ -591,7 +671,7 @@ fn write_trips(output_root: &str, oebb_trips: &[OebbTrip]) -> Result<(), String>
 fn write_stop_times(
     output_root: &str,
     kept_oebb_trip_ids: &HashSet<String>,
-    vienna_stop_ids: &HashSet<String>,
+    scoped_stop_ids: &HashSet<String>,
 ) -> Result<(), String> {
     let out_path = path_for(output_root, STOP_TIMES_FILE);
     let mut wtr = csv_writer(&out_path)?;
@@ -662,7 +742,7 @@ fn write_stop_times(
         }
 
         let stop_id = rec.get(oebb_stop_id_idx).unwrap_or_default();
-        if !vienna_stop_ids.contains(stop_id) {
+        if !scoped_stop_ids.contains(stop_id) {
             continue;
         }
 
@@ -814,17 +894,17 @@ fn rebuild_combined_vienna_gtfs(output_root: &str) -> Result<(), String> {
         .map_err(|err| format!("Failed to create output directory '{output_root}': {err}"))?;
 
     // Build filtered ÖBB subset first, then append it to Wiener Linien files.
-    let (oebb_vienna_stops, vienna_stop_ids) = load_oebb_vienna_stops()?;
+    let (oebb_scoped_stops, scope) = load_oebb_scoped_stops()?;
     let oebb_routes = load_oebb_routes()?;
-    let vienna_counts = count_oebb_vienna_stops_per_trip(&vienna_stop_ids)?;
+    let counts_by_trip = count_oebb_stops_per_trip(&scope)?;
     let (oebb_trips, kept_trip_ids, kept_route_ids, kept_service_ids) =
-        select_oebb_trips(&oebb_routes, &vienna_counts)?;
+        select_oebb_trips(&oebb_routes, &counts_by_trip)?;
 
     let kept_oebb_agency_ids = write_routes(output_root, &oebb_routes, &kept_route_ids)?;
     write_agency(output_root, &kept_oebb_agency_ids)?;
-    write_stops(output_root, &oebb_vienna_stops)?;
+    write_stops(output_root, &oebb_scoped_stops)?;
     write_trips(output_root, &oebb_trips)?;
-    write_stop_times(output_root, &kept_trip_ids, &vienna_stop_ids)?;
+    write_stop_times(output_root, &kept_trip_ids, &scope.scoped_stop_ids)?;
     write_calendar(output_root, &kept_service_ids)?;
     write_calendar_dates(output_root, &kept_service_ids)?;
 

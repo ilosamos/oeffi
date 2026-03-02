@@ -18,6 +18,7 @@ fn run(command: Command) -> ExitCode {
     let result = match command {
         Command::Summary => commands::cmd_gtfs_summary(DEFAULT_GTFS_PATH),
         Command::ListRoutes => commands::cmd_list_routes(DEFAULT_GTFS_PATH),
+        Command::ListStops => commands::cmd_list_stops(DEFAULT_GTFS_PATH),
         Command::Route {
             from,
             to,

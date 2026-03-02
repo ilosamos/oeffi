@@ -14,6 +14,7 @@ Commands:
   route-coords <from_lat> <from_lon> <to_lat> <to_lon> [--debug] [--alts N] [--depart HH:MM] [--date YYYY-MM-DD]
                                               Plan a route between two coordinates
   line <route>                                List all stops in order for a line (all variants)
+  stops                                       List all clustered stops (name + cluster key)
   inspect <query>                             Inspect stop by id/code/name and list serving routes
   routes                                      List all routes (id, short name, long name)
   cache-build [gtfs_path] [cache_file]        Rebuild snapshot + planner caches (default snapshot: gtfs.cache.bin)
@@ -30,6 +31,7 @@ Examples:
   oeffi route "Herrengasse" "Praterstern" --date 2026-03-02 --depart 08:15
   oeffi route-coords 48.2066 16.3707 48.1850 16.3747
   oeffi line U1
+  oeffi stops
   oeffi inspect Karlsplatz
   oeffi routes
   oeffi summary
@@ -40,6 +42,7 @@ Examples:
 pub enum Command {
     Summary,
     ListRoutes,
+    ListStops,
     Route {
         from: String,
         to: String,
@@ -142,6 +145,7 @@ pub fn parse_command(args: &[String]) -> Result<Command, String> {
         "help" if args.len() == 1 => Ok(Command::Help),
         "summary" if args.len() == 1 => Ok(Command::Summary),
         "routes" if args.len() == 1 => Ok(Command::ListRoutes),
+        "stops" if args.len() == 1 => Ok(Command::ListStops),
         "route" => {
             if args.len() < 3 {
                 return Err(
@@ -379,7 +383,7 @@ pub fn parse_command(args: &[String]) -> Result<Command, String> {
             "Invalid arguments for 'cache-build'. Usage: oeffi cache-build [gtfs_path] [cache_file]"
                 .to_string(),
         ),
-        "help" | "summary" | "routes" => {
+        "help" | "summary" | "routes" | "stops" => {
             Err(format!("Too many arguments for command '{}'.", args[0]))
         }
         unknown => Err(format!("Unknown command: '{unknown}'")),
@@ -403,6 +407,12 @@ mod tests {
             parse_command(&args),
             Ok(Command::Line { route }) if route == "U1"
         ));
+    }
+
+    #[test]
+    fn parses_stops() {
+        let args = vec!["stops".to_string()];
+        assert!(matches!(parse_command(&args), Ok(Command::ListStops)));
     }
 
     #[test]
