@@ -67,7 +67,7 @@ pub fn cmd_list_routes(source_path: &str) -> Result<(), String> {
     Ok(())
 }
 
-pub fn cmd_route_stops(source_path: &str, route_name: &str, show_all: bool) -> Result<(), String> {
+pub fn cmd_route_stops(source_path: &str, route_name: &str) -> Result<(), String> {
     ensure_combined_source_ready(source_path)?;
     let snapshot = load_or_build_snapshot(source_path, DEFAULT_CACHE_PATH)?;
 
@@ -117,41 +117,19 @@ pub fn cmd_route_stops(source_path: &str, route_name: &str, show_all: bool) -> R
         return Err(format!("No stops found for route '{route_name}'."));
     }
 
-    // Prefer variants with more stops; this approximates the "main" variant.
-    let mut candidates: Vec<(String, usize)> = ordered_route_ids
+    let mut selected_ids: Vec<String> = ordered_route_ids
         .iter()
         .filter_map(|route_id| {
             snapshot
                 .route_stops_by_route_id
                 .get(route_id)
-                .map(|stops| (route_id.clone(), stops.len()))
+                .map(|_| route_id.clone())
         })
         .collect();
-    candidates.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
+    selected_ids.sort();
+    selected_ids.dedup();
 
-    // Either print all variants or just the best (longest) one.
-    let selected_ids: Vec<String> = if show_all {
-        candidates
-            .into_iter()
-            .map(|(route_id, _)| route_id)
-            .collect()
-    } else {
-        candidates
-            .into_iter()
-            .next()
-            .map(|(route_id, _)| vec![route_id])
-            .unwrap_or_default()
-    };
-
-    if show_all {
-        println!(
-            "Route {route_name} in {source_path} (all variants, via cache: {DEFAULT_CACHE_PATH})"
-        );
-    } else {
-        println!(
-            "Route {route_name} in {source_path} (longest variant, via cache: {DEFAULT_CACHE_PATH})"
-        );
-    }
+    println!("Line {route_name} in {source_path} (via cache: {DEFAULT_CACHE_PATH})");
 
     for route_id in selected_ids {
         if let Some(stops) = snapshot.route_stops_by_route_id.get(&route_id) {
@@ -377,7 +355,7 @@ pub fn cmd_stop_inspect(source_path: &str, query: &str) -> Result<(), String> {
         };
 
         return Err(format!(
-            "No stops found for query '{query}'.\nSearched fields: cluster key, stop id, stop code, exact stop/station name, and high-confidence fuzzy stop/station name.\n{suggestion_text}\nExamples:\n  oeffi stop-inspect \"Karlsplatz\"\n  oeffi stop-inspect \"at:49:657:0:8\""
+            "No stops found for query '{query}'.\nSearched fields: cluster key, stop id, stop code, exact stop/station name, and high-confidence fuzzy stop/station name.\n{suggestion_text}\nExamples:\n  oeffi inspect \"Karlsplatz\"\n  oeffi inspect \"at:49:657:0:8\""
         ));
     }
 

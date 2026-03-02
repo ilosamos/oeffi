@@ -47,6 +47,12 @@ fn station_label(cache: &PlannerCache, station_idx: u32, debug: bool) -> String 
 }
 
 fn print_option(cache: &PlannerCache, option: &RouteOption, debug: bool) {
+    if option.access_secs > 0 {
+        println!(
+            "  Walk to start station: {}",
+            format_delta_secs(option.access_secs)
+        );
+    }
     for (idx, leg) in option.legs.iter().enumerate() {
         let route = &cache.routes[leg.route_idx as usize];
         println!(
@@ -70,6 +76,12 @@ fn print_option(cache: &PlannerCache, option: &RouteOption, debug: bool) {
             );
         }
     }
+    if option.egress_secs > 0 {
+        println!(
+            "  Walk from destination station: {}",
+            format_delta_secs(option.egress_secs)
+        );
+    }
 }
 
 pub fn print_route_plan(cache: &PlannerCache, result: &RoutePlanResult, debug: bool) {
@@ -83,6 +95,12 @@ pub fn print_route_plan(cache: &PlannerCache, result: &RoutePlanResult, debug: b
         format_secs_hhmm(result.depart_secs)
     );
     println!("Arrival: {}", format_secs_hhmm(result.arrival_secs));
+    if result.chosen_access_secs > 0 || result.chosen_egress_secs > 0 {
+        println!(
+            "Door-to-door walking: {}",
+            format_delta_secs(result.chosen_access_secs + result.chosen_egress_secs)
+        );
+    }
 
     if debug {
         println!("Model: station-normalized planning (hybrid stop->station cache)");
@@ -162,6 +180,9 @@ pub fn print_route_plan(cache: &PlannerCache, result: &RoutePlanResult, debug: b
         from_idx: result.chosen_from_idx,
         to_idx: result.chosen_to_idx,
         adjusted_arrival: result.arrival_secs,
+        access_secs: result.chosen_access_secs,
+        egress_secs: result.chosen_egress_secs,
+        generalized_cost: 0,
         legs: result.chosen_legs.clone(),
     };
     print_option(cache, &chosen, debug);
@@ -174,11 +195,12 @@ pub fn print_route_plan(cache: &PlannerCache, result: &RoutePlanResult, debug: b
             for (idx, alt) in result.alternatives.iter().enumerate() {
                 let delay = alt.adjusted_arrival.saturating_sub(result.arrival_secs);
                 println!(
-                    "  Alternative {}: arrival {} ({} later), legs {}",
+                    "  Alternative {}: arrival {} ({} later), legs {}, walk {}",
                     idx + 1,
                     format_secs_hhmm(alt.adjusted_arrival),
                     format_delta_secs(delay),
-                    alt.legs.len()
+                    alt.legs.len(),
+                    format_delta_secs(alt.access_secs + alt.egress_secs)
                 );
                 println!(
                     "    pair: {} -> {}",

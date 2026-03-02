@@ -13,15 +13,16 @@ At runtime, the CLI builds and uses a merged source at `data/combined-vienna`:
 - ÖBB (Vienna-only `at:49:*` stops, commuter rail routes only: `S*`, `REX*`, `R*`)
 
 ## Main Commands
-- `oeffi gtfs-summary`
+- `oeffi route <from> <to> [--debug] [--alts N] [--depart HH:MM] [--date YYYY-MM-DD]`
+- `oeffi route-coords <from_lat> <from_lon> <to_lat> <to_lon> [--debug] [--alts N] [--depart HH:MM] [--date YYYY-MM-DD]`
+- `oeffi line <route>`
+- `oeffi inspect <query>`
 - `oeffi routes`
-- `oeffi route-stops <route> [--all]`
-- `oeffi stop-inspect <query>`
-- `oeffi route-plan <from> <to> [--debug] [--alts N] [--depart HH:MM] [--date YYYY-MM-DD]`
+- `oeffi summary`
 - `oeffi cache-build [gtfs_path] [cache_file]`
 
 Notes:
-- `route-plan` now applies `calendar.txt` + `calendar_dates.txt` for the current service day.
+- `route` now applies `calendar.txt` + `calendar_dates.txt` for the current service day.
 
 ## Cache Files
 - `gtfs.cache.bin`: snapshot cache for inspect/list commands.

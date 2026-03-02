@@ -16,9 +16,9 @@ use cli::{Command, DEFAULT_GTFS_PATH, USAGE, parse_command};
 
 fn run(command: Command) -> ExitCode {
     let result = match command {
-        Command::GtfsSummary => commands::cmd_gtfs_summary(DEFAULT_GTFS_PATH),
+        Command::Summary => commands::cmd_gtfs_summary(DEFAULT_GTFS_PATH),
         Command::ListRoutes => commands::cmd_list_routes(DEFAULT_GTFS_PATH),
-        Command::RoutePlan {
+        Command::Route {
             from,
             to,
             debug,
@@ -33,10 +33,27 @@ fn run(command: Command) -> ExitCode {
             depart_secs,
             service_date,
         ),
-        Command::RouteStops { route, show_all } => {
-            commands::cmd_route_stops(DEFAULT_GTFS_PATH, &route, show_all)
-        }
-        Command::StopInspect { query } => commands::cmd_stop_inspect(DEFAULT_GTFS_PATH, &query),
+        Command::RouteCoords {
+            from_lat,
+            from_lon,
+            to_lat,
+            to_lon,
+            debug,
+            alternatives,
+            depart_secs,
+            service_date,
+        } => route_planner::cmd_route_plan_coords(
+            from_lat,
+            from_lon,
+            to_lat,
+            to_lon,
+            debug,
+            alternatives,
+            depart_secs,
+            service_date,
+        ),
+        Command::Line { route } => commands::cmd_route_stops(DEFAULT_GTFS_PATH, &route),
+        Command::Inspect { query } => commands::cmd_stop_inspect(DEFAULT_GTFS_PATH, &query),
         Command::CacheBuild {
             source_path,
             cache_path,

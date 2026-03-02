@@ -10,7 +10,7 @@ pub const MAX_TRANSFERS: usize = 6;
 pub const MIN_TRANSFER_SECONDS: usize = 150;
 pub const DEFAULT_TRANSFER_SECONDS: usize = 300;
 pub const PLANNER_CACHE_PATH: &str = "planner.cache.bin";
-pub const PLANNER_CACHE_VERSION: u32 = 2;
+pub const PLANNER_CACHE_VERSION: u32 = 3;
 pub const PLANNER_CACHE_DECODE_LIMIT_BYTES: u64 = 1024 * 1024 * 1024;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -19,6 +19,8 @@ pub struct PlannerStop {
     pub name: String,
     pub code: Option<String>,
     pub parent_station: Option<String>,
+    pub lat: Option<f64>,
+    pub lon: Option<f64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -26,6 +28,8 @@ pub struct PlannerStation {
     pub key: String,
     pub name: String,
     pub member_stop_ids: Vec<String>,
+    pub centroid_lat: Option<f64>,
+    pub centroid_lon: Option<f64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -168,6 +172,9 @@ pub struct RouteOption {
     pub from_idx: u32,
     pub to_idx: u32,
     pub adjusted_arrival: usize,
+    pub access_secs: usize,
+    pub egress_secs: usize,
+    pub generalized_cost: usize,
     pub legs: Vec<LegTiming>,
 }
 
@@ -182,6 +189,8 @@ pub struct RoutePlanResult {
     pub to_station_idxs: Vec<u32>,
     pub chosen_from_idx: u32,
     pub chosen_to_idx: u32,
+    pub chosen_access_secs: usize,
+    pub chosen_egress_secs: usize,
     pub chosen_legs: Vec<LegTiming>,
     pub evaluated_pairs: Vec<EvaluatedPair>,
     pub alternatives: Vec<RouteOption>,

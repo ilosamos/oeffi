@@ -64,6 +64,8 @@ pub(crate) fn build_planner_cache(source_path: &str) -> Result<PlannerCache, Str
             name: stop.name.clone().unwrap_or_else(|| "<unknown>".to_string()),
             code: stop.code.clone(),
             parent_station: stop.parent_station.clone(),
+            lat: stop.latitude,
+            lon: stop.longitude,
         });
     }
 
@@ -102,7 +104,33 @@ pub(crate) fn build_planner_cache(source_path: &str) -> Result<PlannerCache, Str
             key: cluster.key.clone(),
             name: cluster.name.clone(),
             member_stop_ids,
+            centroid_lat: None,
+            centroid_lon: None,
         });
+    }
+
+    for station in &mut stations {
+        let mut lat_sum = 0.0f64;
+        let mut lon_sum = 0.0f64;
+        let mut count = 0usize;
+
+        for stop_id in &station.member_stop_ids {
+            let Some(stop_idx) = stop_idx_by_id.get(stop_id).copied() else {
+                continue;
+            };
+            let stop = &stops[stop_idx as usize];
+            let (Some(lat), Some(lon)) = (stop.lat, stop.lon) else {
+                continue;
+            };
+            lat_sum += lat;
+            lon_sum += lon;
+            count += 1;
+        }
+
+        if count > 0 {
+            station.centroid_lat = Some(lat_sum / count as f64);
+            station.centroid_lon = Some(lon_sum / count as f64);
+        }
     }
 
     for station_idxs in station_idxs_by_code_upper.values_mut() {

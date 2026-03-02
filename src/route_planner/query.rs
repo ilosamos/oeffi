@@ -11,12 +11,77 @@ use super::model::{
 };
 use super::raptor_adapter::PlannerTimetable;
 
+const EARTH_RADIUS_M: f64 = 6_371_000.0;
+const WALK_METERS_PER_SECOND: f64 = 1.2;
+const MAX_COORD_CANDIDATES: usize = 12;
+const MAX_ACCESS_DISTANCE_METERS: f64 = 1_200.0;
+const TRANSFER_PENALTY_SECONDS: usize = 240;
+
+#[derive(Debug, Clone)]
+struct StationCandidate {
+    station_idx: u32,
+    walk_secs: usize,
+    distance_meters: f64,
+}
+
 fn better_journey(candidate: &Journey<u32, u32>, current_best: &Journey<u32, u32>) -> bool {
     match candidate.arrival.cmp(&current_best.arrival) {
         Ordering::Less => true,
         Ordering::Equal => candidate.plan.len() < current_best.plan.len(),
         Ordering::Greater => false,
     }
+}
+
+fn haversine_meters(lat1: f64, lon1: f64, lat2: f64, lon2: f64) -> f64 {
+    let dlat = (lat2 - lat1).to_radians();
+    let dlon = (lon2 - lon1).to_radians();
+    let lat1 = lat1.to_radians();
+    let lat2 = lat2.to_radians();
+
+    let a = (dlat / 2.0).sin().powi(2) + lat1.cos() * lat2.cos() * (dlon / 2.0).sin().powi(2);
+    let c = 2.0 * a.sqrt().atan2((1.0 - a).sqrt());
+    EARTH_RADIUS_M * c
+}
+
+fn walk_secs_for_distance(distance_meters: f64) -> usize {
+    (distance_meters / WALK_METERS_PER_SECOND).ceil() as usize
+}
+
+fn nearest_station_candidates(
+    cache: &PlannerCache,
+    lat: f64,
+    lon: f64,
+    max_results: usize,
+    max_distance_meters: f64,
+) -> Vec<StationCandidate> {
+    let mut candidates: Vec<StationCandidate> = cache
+        .stations
+        .iter()
+        .enumerate()
+        .filter_map(|(idx, station)| {
+            let (Some(st_lat), Some(st_lon)) = (station.centroid_lat, station.centroid_lon) else {
+                return None;
+            };
+            let distance_meters = haversine_meters(lat, lon, st_lat, st_lon);
+            if distance_meters > max_distance_meters {
+                return None;
+            }
+            Some(StationCandidate {
+                station_idx: idx as u32,
+                walk_secs: walk_secs_for_distance(distance_meters),
+                distance_meters,
+            })
+        })
+        .collect();
+
+    candidates.sort_by(|a, b| {
+        a.walk_secs
+            .cmp(&b.walk_secs)
+            .then_with(|| a.distance_meters.total_cmp(&b.distance_meters))
+            .then(a.station_idx.cmp(&b.station_idx))
+    });
+    candidates.truncate(max_results);
+    candidates
 }
 
 pub fn match_station_idxs(cache: &PlannerCache, query: &str) -> Vec<u32> {
@@ -130,6 +195,25 @@ fn evaluate_journey_arrival_with_transfer_slack(
     Some((arrival, legs))
 }
 
+fn generalized_cost(
+    depart_secs: usize,
+    arrival_secs: usize,
+    access_secs: usize,
+    egress_secs: usize,
+    legs_count: usize,
+) -> usize {
+    let in_vehicle_and_wait = arrival_secs.saturating_sub(depart_secs);
+    let total_walk = access_secs.saturating_add(egress_secs);
+    let walk_penalty = total_walk.saturating_mul(8) / 10; // 1.8x walk disutility in total.
+    let transfer_penalty = legs_count
+        .saturating_sub(1)
+        .saturating_mul(TRANSFER_PENALTY_SECONDS);
+
+    in_vehicle_and_wait
+        .saturating_add(walk_penalty)
+        .saturating_add(transfer_penalty)
+}
+
 pub fn plan_route(
     cache: &PlannerCache,
     from_query: &str,
@@ -198,6 +282,15 @@ pub fn plan_route(
                     from_idx: *from_idx,
                     to_idx: *to_idx,
                     adjusted_arrival,
+                    access_secs: 0,
+                    egress_secs: 0,
+                    generalized_cost: generalized_cost(
+                        depart_secs,
+                        adjusted_arrival,
+                        0,
+                        0,
+                        legs.len(),
+                    ),
                     legs: legs.clone(),
                 };
                 all_options.push(option);
@@ -228,13 +321,25 @@ pub fn plan_route(
                     from_idx: *from_idx,
                     to_idx: *to_idx,
                     adjusted_arrival,
+                    access_secs: 0,
+                    egress_secs: 0,
+                    generalized_cost: generalized_cost(
+                        depart_secs,
+                        adjusted_arrival,
+                        0,
+                        0,
+                        legs.len(),
+                    ),
                     legs,
                 };
                 match &best {
                     None => best = Some(option),
                     Some(current)
-                        if option.adjusted_arrival < current.adjusted_arrival
-                            || (option.adjusted_arrival == current.adjusted_arrival
+                        if option.generalized_cost < current.generalized_cost
+                            || (option.generalized_cost == current.generalized_cost
+                                && option.adjusted_arrival < current.adjusted_arrival)
+                            || (option.generalized_cost == current.generalized_cost
+                                && option.adjusted_arrival == current.adjusted_arrival
                                 && option.legs.len() < current.legs.len()) =>
                     {
                         best = Some(option)
@@ -262,8 +367,9 @@ pub fn plan_route(
     };
 
     all_options.sort_by(|a, b| {
-        a.adjusted_arrival
-            .cmp(&b.adjusted_arrival)
+        a.generalized_cost
+            .cmp(&b.generalized_cost)
+            .then(a.adjusted_arrival.cmp(&b.adjusted_arrival))
             .then(a.legs.len().cmp(&b.legs.len()))
     });
     let alternatives: Vec<RouteOption> = all_options
@@ -287,6 +393,217 @@ pub fn plan_route(
         to_station_idxs,
         chosen_from_idx: best.from_idx,
         chosen_to_idx: best.to_idx,
+        chosen_access_secs: best.access_secs,
+        chosen_egress_secs: best.egress_secs,
+        chosen_legs: best.legs,
+        evaluated_pairs: pair_stats,
+        alternatives,
+    })
+}
+
+pub fn plan_route_from_coords(
+    cache: &PlannerCache,
+    from_lat: f64,
+    from_lon: f64,
+    to_lat: f64,
+    to_lon: f64,
+    alternatives: usize,
+    depart_secs_override: Option<usize>,
+    query_date_override: Option<NaiveDate>,
+) -> Result<RoutePlanResult, String> {
+    let now = Local::now();
+    let query_date = query_date_override.unwrap_or(now.date_naive());
+    let depart_secs = match (depart_secs_override, query_date_override) {
+        (Some(dep), _) => dep,
+        (None, Some(_)) => 0,
+        (None, None) => now.time().num_seconds_from_midnight() as usize,
+    };
+
+    let from_candidates = nearest_station_candidates(
+        cache,
+        from_lat,
+        from_lon,
+        MAX_COORD_CANDIDATES,
+        MAX_ACCESS_DISTANCE_METERS,
+    );
+    if from_candidates.is_empty() {
+        return Err(format!(
+            "No origin stations found within {:.0}m of {}, {}.",
+            MAX_ACCESS_DISTANCE_METERS, from_lat, from_lon
+        ));
+    }
+    let to_candidates = nearest_station_candidates(
+        cache,
+        to_lat,
+        to_lon,
+        MAX_COORD_CANDIDATES,
+        MAX_ACCESS_DISTANCE_METERS,
+    );
+    if to_candidates.is_empty() {
+        return Err(format!(
+            "No destination stations found within {:.0}m of {}, {}.",
+            MAX_ACCESS_DISTANCE_METERS, to_lat, to_lon
+        ));
+    }
+
+    let from_station_idxs: Vec<u32> = from_candidates.iter().map(|c| c.station_idx).collect();
+    let to_station_idxs: Vec<u32> = to_candidates.iter().map(|c| c.station_idx).collect();
+
+    let active_trips = cache.active_trip_mask_for_date(query_date);
+    let timetable = PlannerTimetable {
+        cache,
+        active_trips: Some(&active_trips),
+    };
+
+    let mut best: Option<RouteOption> = None;
+    let mut pair_stats: Vec<EvaluatedPair> = Vec::new();
+    let mut all_options: Vec<RouteOption> = Vec::new();
+
+    for from_candidate in &from_candidates {
+        for to_candidate in &to_candidates {
+            let effective_depart = depart_secs.saturating_add(from_candidate.walk_secs);
+            let journeys = timetable.raptor(
+                MAX_TRANSFERS,
+                effective_depart,
+                from_candidate.station_idx,
+                to_candidate.station_idx,
+            );
+            if journeys.is_empty() {
+                pair_stats.push(EvaluatedPair {
+                    from_idx: from_candidate.station_idx,
+                    to_idx: to_candidate.station_idx,
+                    pareto_count: 0,
+                    best_arrival: None,
+                    legs_count: None,
+                });
+                continue;
+            }
+
+            let mut local_best: Option<(Journey<u32, u32>, RouteOption)> = None;
+            for journey in journeys {
+                let Some((transit_arrival, legs)) = evaluate_journey_arrival_with_transfer_slack(
+                    cache,
+                    from_candidate.station_idx,
+                    &journey,
+                    effective_depart,
+                    Some(&active_trips),
+                ) else {
+                    continue;
+                };
+
+                let adjusted_arrival = transit_arrival.saturating_add(to_candidate.walk_secs);
+                let option = RouteOption {
+                    from_idx: from_candidate.station_idx,
+                    to_idx: to_candidate.station_idx,
+                    adjusted_arrival,
+                    access_secs: from_candidate.walk_secs,
+                    egress_secs: to_candidate.walk_secs,
+                    generalized_cost: generalized_cost(
+                        depart_secs,
+                        adjusted_arrival,
+                        from_candidate.walk_secs,
+                        to_candidate.walk_secs,
+                        legs.len(),
+                    ),
+                    legs: legs.clone(),
+                };
+                all_options.push(option.clone());
+
+                match &local_best {
+                    None => local_best = Some((journey, option)),
+                    Some((current_journey, current_option))
+                        if option.generalized_cost < current_option.generalized_cost
+                            || (option.generalized_cost == current_option.generalized_cost
+                                && option.adjusted_arrival < current_option.adjusted_arrival)
+                            || (option.generalized_cost == current_option.generalized_cost
+                                && option.adjusted_arrival == current_option.adjusted_arrival
+                                && better_journey(&journey, current_journey)) =>
+                    {
+                        local_best = Some((journey, option))
+                    }
+                    _ => {}
+                }
+            }
+
+            if let Some((_, option)) = local_best {
+                pair_stats.push(EvaluatedPair {
+                    from_idx: option.from_idx,
+                    to_idx: option.to_idx,
+                    pareto_count: 1,
+                    best_arrival: Some(option.adjusted_arrival),
+                    legs_count: Some(option.legs.len()),
+                });
+
+                match &best {
+                    None => best = Some(option),
+                    Some(current)
+                        if option.generalized_cost < current.generalized_cost
+                            || (option.generalized_cost == current.generalized_cost
+                                && option.adjusted_arrival < current.adjusted_arrival)
+                            || (option.generalized_cost == current.generalized_cost
+                                && option.adjusted_arrival == current.adjusted_arrival
+                                && option.legs.len() < current.legs.len()) =>
+                    {
+                        best = Some(option)
+                    }
+                    _ => {}
+                }
+            } else {
+                pair_stats.push(EvaluatedPair {
+                    from_idx: from_candidate.station_idx,
+                    to_idx: to_candidate.station_idx,
+                    pareto_count: 0,
+                    best_arrival: None,
+                    legs_count: None,
+                });
+            }
+        }
+    }
+
+    let Some(best) = best else {
+        return Err(format!(
+            "No route found from ({}, {}) to ({}, {}) for {} after {:02}:{:02}.",
+            from_lat,
+            from_lon,
+            to_lat,
+            to_lon,
+            query_date,
+            depart_secs / 3600,
+            (depart_secs % 3600) / 60
+        ));
+    };
+
+    all_options.sort_by(|a, b| {
+        a.generalized_cost
+            .cmp(&b.generalized_cost)
+            .then(a.adjusted_arrival.cmp(&b.adjusted_arrival))
+            .then(a.legs.len().cmp(&b.legs.len()))
+    });
+    let alternatives: Vec<RouteOption> = all_options
+        .into_iter()
+        .filter(|o| {
+            !(o.from_idx == best.from_idx
+                && o.to_idx == best.to_idx
+                && o.adjusted_arrival == best.adjusted_arrival
+                && o.access_secs == best.access_secs
+                && o.egress_secs == best.egress_secs
+                && o.legs == best.legs)
+        })
+        .take(alternatives)
+        .collect();
+
+    Ok(RoutePlanResult {
+        from_query: format!("{from_lat:.6},{from_lon:.6}"),
+        to_query: format!("{to_lat:.6},{to_lon:.6}"),
+        query_date: query_date.to_string(),
+        depart_secs,
+        arrival_secs: best.adjusted_arrival,
+        from_station_idxs,
+        to_station_idxs,
+        chosen_from_idx: best.from_idx,
+        chosen_to_idx: best.to_idx,
+        chosen_access_secs: best.access_secs,
+        chosen_egress_secs: best.egress_secs,
         chosen_legs: best.legs,
         evaluated_pairs: pair_stats,
         alternatives,
@@ -316,16 +633,22 @@ mod tests {
                 key: "A".to_string(),
                 name: "A".to_string(),
                 member_stop_ids: vec!["a:1".to_string()],
+                centroid_lat: Some(48.2000),
+                centroid_lon: Some(16.3600),
             },
             PlannerStation {
                 key: "B".to_string(),
                 name: "B".to_string(),
                 member_stop_ids: vec!["b:1".to_string()],
+                centroid_lat: Some(48.2100),
+                centroid_lon: Some(16.3700),
             },
             PlannerStation {
                 key: "C".to_string(),
                 name: "C".to_string(),
                 member_stop_ids: vec!["c:1".to_string()],
+                centroid_lat: Some(48.2200),
+                centroid_lon: Some(16.3800),
             },
         ];
 
@@ -451,6 +774,14 @@ mod tests {
 
         // Route 1 at station B should pick trip 2 (10:07), since trip 1 (10:05) is inactive.
         assert_eq!(timetable.get_earliest_trip(1, 36_300, 1), Some(2));
+    }
+
+    #[test]
+    fn nearest_station_candidates_prefers_closest_station() {
+        let cache = tiny_cache();
+        let candidates = nearest_station_candidates(&cache, 48.2099, 16.3699, 3, 2_500.0);
+        assert!(!candidates.is_empty());
+        assert_eq!(candidates[0].station_idx, 1);
     }
 
     #[test]
