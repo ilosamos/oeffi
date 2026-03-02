@@ -12,7 +12,7 @@ mod snapshot;
 use std::env;
 use std::process::ExitCode;
 
-use cli::{Command, DEFAULT_GTFS_PATH, USAGE, parse_command};
+use cli::{Command, DEFAULT_GTFS_PATH, is_help_error, parse_command, render_help};
 
 fn run(command: Command) -> ExitCode {
     let result = match command {
@@ -60,7 +60,7 @@ fn run(command: Command) -> ExitCode {
             cache_path,
         } => commands::cmd_cache_build(&source_path, &cache_path),
         Command::Help => {
-            println!("{USAGE}");
+            print!("{}", render_help());
             Ok(())
         }
     };
@@ -80,9 +80,12 @@ fn main() -> ExitCode {
 
     match parse_command(&args) {
         Ok(command) => run(command),
-        Err(message) => {
-            eprintln!("Error: {message}");
-            eprintln!("Run `oeffi help` for usage.");
+        Err(err) => {
+            if is_help_error(&err) {
+                print!("{err}");
+                return ExitCode::SUCCESS;
+            }
+            eprintln!("{err}");
             ExitCode::from(2)
         }
     }
