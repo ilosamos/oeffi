@@ -4,3 +4,4 @@
 data/*
 .DS_Store
 *.bin
+scripts/release.sh
