@@ -4,6 +4,25 @@ Fast local CLI for Vienna transit routing using Wiener Linien + ÖBB GTFS data.
 
 ## TL;DR
 
+Route plan example:
+
+```console
+$ oeffi route praterstern westbahnhof
+Route plan: 'praterstern' -> 'westbahnhof'
+Service day: 2026-03-03
+Departure (query time): 08:33
+Arrival: 08:48
+
+Itinerary:
+  1. Ride U1 [21-U1-j26-1] Wien Praterstern -> Stephansplatz
+     dep 08:34 | arr 08:37 | 3 stops
+     transfer at Stephansplatz
+  2. Ride U3 [21-U3-j26-1] Stephansplatz -> Wien Westbahnhof
+     dep 08:41 | arr 08:48 | 5 stops
+```
+
+Other commands:
+
 ```bash
 # first run (download data and build cache)
 oeffi init
@@ -18,13 +37,12 @@ oeffi route "Herrengasse" "Praterstern" --date 2026-03-02 --depart 08:15
 oeffi route-coords 48.2066 16.3707 48.1850 16.3747
 ```
 
-## Why oeffi
+## Features
 
-- Fast: local caches, no external planner API
-- Local-first: works from downloaded GTFS files
-- Readable: terminal output optimized for humans
-- Agent-friendly: simple commands and config access for automation
-- Built on [`raptor-rs`](https://github.com/keogami/raptor-rs) for RAPTOR-based route planning
+- Blazingly fast route planning and data inspection
+- Local caches, no external planner API
+- Can be easily integrated as agent skill
+- Built on `[raptor-rs](https://github.com/keogami/raptor-rs)` for RAPTOR-based route planning
 
 ## Install
 
@@ -67,8 +85,6 @@ oeffi config list
 - `oeffi init`: download raw data, merge feeds, build caches
 - `oeffi init --force`: same as above, but overwrites existing raw data
 - `oeffi cache-build --download`: refresh raw data and rebuild caches
-
-If local source data is missing, the CLI suggests running `init` or `cache-build --download`.
 
 ## Compatibility
 
@@ -146,8 +162,6 @@ Environment overrides:
 - `OEFFI_OEBB_GTFS_URL`
 
 By default paths are resolved using OS app directories (`directories::ProjectDirs`).
-
-
 
 ## TODO
 
