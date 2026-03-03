@@ -17,6 +17,9 @@ use self::model::{
 };
 use self::normalize::{canonical_street, normalize_ascii, normalized_address_key, strip_house_number_unit};
 
+const EMBEDDED_VIENNA_POLYGON_PATH: &str = "embedded:assets/vienna-polygon.json";
+const EMBEDDED_VIENNA_POLYGON_GEOJSON: &str = include_str!("../../assets/vienna-polygon.json");
+
 #[derive(Debug, Clone)]
 struct AddressAgg {
     street: String,
@@ -145,12 +148,10 @@ fn extract_polygons_from_geometry(geometry: &Geometry) -> Result<Vec<Polygon<f64
     }
 }
 
-fn load_polygon(path: &str) -> Result<MultiPolygon<f64>, String> {
-    let raw = fs::read_to_string(path)
-        .map_err(|err| format!("Failed to read polygon file '{path}': {err}"))?;
+fn load_polygon_from_geojson(raw: &str, label: &str) -> Result<MultiPolygon<f64>, String> {
     let geojson = raw
         .parse::<GeoJson>()
-        .map_err(|err| format!("Failed to parse GeoJSON in '{path}': {err}"))?;
+        .map_err(|err| format!("Failed to parse GeoJSON in '{label}': {err}"))?;
 
     let mut polygons = Vec::new();
     match geojson {
@@ -164,7 +165,7 @@ fn load_polygon(path: &str) -> Result<MultiPolygon<f64>, String> {
         GeoJson::Feature(feature) => {
             let geometry = feature
                 .geometry
-                .ok_or_else(|| format!("Feature in '{path}' has no geometry"))?;
+                .ok_or_else(|| format!("Feature in '{label}' has no geometry"))?;
             polygons.extend(extract_polygons_from_geometry(&geometry)?);
         }
         GeoJson::Geometry(geometry) => {
@@ -173,7 +174,7 @@ fn load_polygon(path: &str) -> Result<MultiPolygon<f64>, String> {
     }
 
     if polygons.is_empty() {
-        return Err(format!("No polygon geometry found in '{path}'"));
+        return Err(format!("No polygon geometry found in '{label}'"));
     }
     Ok(MultiPolygon(polygons))
 }
@@ -348,9 +349,10 @@ fn load_cache(path: &str) -> Result<GeocodeCache, String> {
     Ok(cache)
 }
 
-pub fn cmd_geocode_build(pbf_path: &str, polygon_path: &str, out_path: &str) -> Result<(), String> {
-    eprintln!("Loading Vienna polygon from {polygon_path} ...");
-    let polygon = load_polygon(polygon_path)?;
+pub fn cmd_geocode_build(pbf_path: &str, out_path: &str) -> Result<(), String> {
+    eprintln!("Loading embedded Vienna polygon ({EMBEDDED_VIENNA_POLYGON_PATH}) ...");
+    let polygon =
+        load_polygon_from_geojson(EMBEDDED_VIENNA_POLYGON_GEOJSON, EMBEDDED_VIENNA_POLYGON_PATH)?;
 
     eprintln!("Scanning OSM PBF from {pbf_path} ...");
     let file = File::open(pbf_path).map_err(|err| format!("Failed to open PBF '{pbf_path}': {err}"))?;
@@ -568,7 +570,7 @@ pub fn cmd_geocode_build(pbf_path: &str, polygon_path: &str, out_path: &str) -> 
         version: GEOCODE_CACHE_VERSION,
         built_unix_ts: Utc::now().timestamp(),
         source_pbf: pbf_path.to_string(),
-        polygon_path: polygon_path.to_string(),
+        polygon_path: EMBEDDED_VIENNA_POLYGON_PATH.to_string(),
         stats,
         addresses: records,
         landmarks,

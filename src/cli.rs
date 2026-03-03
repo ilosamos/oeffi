@@ -87,7 +87,7 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum CliCommand {
-    #[command(about = "First-run setup: download feeds, merge, and build caches")]
+    #[command(about = "First-run setup: download feeds + map data, merge, and build caches")]
     Init {
         #[arg(short = 'f', long = "force", help = "Overwrite existing raw GTFS data")]
         force: bool,
@@ -155,11 +155,11 @@ enum ConfigSubcommand {
 
 #[derive(Debug, Subcommand)]
 enum CacheSubcommand {
-    #[command(about = "Rebuild snapshot + planner caches")]
+    #[command(about = "Rebuild snapshot + planner + geocode caches")]
     Build {
         #[arg(
             long = "download",
-            help = "Download raw GTFS feeds before rebuilding caches"
+            help = "Download GTFS feeds and OSM PBF map data before rebuild"
         )]
         download: bool,
     },

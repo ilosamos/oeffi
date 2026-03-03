@@ -1,48 +1,50 @@
 # oeffi - Wiener Linien Öffi CLI
 
-Fast local CLI for Vienna transit routing using Wiener Linien + ÖBB GTFS data.
+Fast local CLI for Vienna transit routing using Wiener Linien + ÖBB GTFS data and OSM data for geocoding.
 
 ## TL;DR
 
-Route plan example:
+Simple route plan example:
 
 ```console
-$ oeffi route praterstern westbahnhof
-Route plan: 'praterstern' -> 'westbahnhof'
+$ oeffi route westbahnhof "mochi ramen bar"
+Route plan: 'westbahnhof' -> 'mochi ramen bar'
 Service day: 2026-03-03
-Departure (query time): 08:33
-Arrival: 08:48
+Departure (query time): 22:30
+Arrival: 22:51
+Door-to-door walking: 5m
 
 Itinerary:
-  1. Ride U1 [21-U1-j26-1] Wien Praterstern -> Stephansplatz
-     dep 08:34 | arr 08:37 | 3 stops
+  1. Ride U3 Wien Westbahnhof -> Stephansplatz
+     dep 22:33 | arr 22:40 | 5 stops
      transfer at Stephansplatz
-  2. Ride U3 [21-U3-j26-1] Stephansplatz -> Wien Westbahnhof
-     dep 08:41 | arr 08:48 | 5 stops
+  2. Ride U1 Stephansplatz -> Vorgartenstraße
+     dep 22:43 | arr 22:47 | 4 stops
+  Walk from destination station: 5m
 ```
 
-Other commands:
+More examples:
 
 ```bash
-# first run (download data and build cache)
+# first run (download data and build cache) will take a few minutes
 oeffi init
 
-# route by station names
+# routes work with stops, addresses, landmarks, restaurants, coordinates, etc.
 oeffi route "Karlsplatz" "Praterstern"
+oeffi route "mochi ramen bar" "haus des meeres"
+oeffi route "48.2066 16.3707" "48.1850 16.3747"
 
 # route with date/time
-oeffi route "Herrengasse" "Praterstern" --date 2026-03-02 --depart 08:15
-
-# route by coordinates
-oeffi route-coords 48.2066 16.3707 48.1850 16.3747
+oeffi route "maria hilfer strasse 1" "Praterstern" --date 2026-03-02 --depart 08:15
 ```
 
 ## Features
 
 - Blazingly fast route planning and data inspection
+- Support route planning with stops, addresses, coordinates, landmarks, restaurants etc.
 - Local caches, no external planner API
 - Can be easily integrated as agent skill
-- Built on [`raptor-rs`](https://github.com/keogami/raptor-rs) for RAPTOR-based route planning
+- Built on `[raptor-rs](https://github.com/keogami/raptor-rs)` for RAPTOR-based route planning
 
 ## Install
 
@@ -50,8 +52,22 @@ oeffi route-coords 48.2066 16.3707 48.1850 16.3747
 
 Download the archive for your platform, extract it, and place `oeffi` on your `PATH`.
 
+MacOS:
+
 ```bash
-VERSION=0.1.0
+VERSION=0.1.5
+# macOS Apple Silicon (aarch64)
+curl -L -o oeffi.tar.gz "https://github.com/ilosamos/oeffi/releases/download/v${VERSION}/oeffi-${VERSION}-aarch64-apple-darwin.tar.gz"
+tar -xzf oeffi.tar.gz
+sudo install -m 755 oeffi-${VERSION}-aarch64-apple-darwin/oeffi /usr/local/bin/oeffi
+oeffi version
+```
+
+Linux:
+
+```bash
+VERSION=0.1.5
+# Linux x86_64
 curl -L -o oeffi.tar.gz "https://github.com/ilosamos/oeffi/releases/download/v${VERSION}/oeffi-${VERSION}-x86_64-unknown-linux-gnu.tar.gz"
 tar -xzf oeffi.tar.gz
 sudo install -m 755 oeffi-${VERSION}-x86_64-unknown-linux-gnu/oeffi /usr/local/bin/oeffi
@@ -65,26 +81,28 @@ cargo build --release
 ./target/release/oeffi version
 ```
 
-## Common commands
+## All commands
 
 ```bash
-oeffi summary
-oeffi routes
-oeffi stops
-oeffi inspect "Karlsplatz"
-oeffi line U1
-oeffi cache-build
-oeffi cache-build --download
 oeffi init
-oeffi init --force
-oeffi config list
+oeffi route <from> <to>
+oeffi geocode <query>
+oeffi inspect <query>
+oeffi stops
+oeffi line <route>
+oeffi routes
+oeffi summary
+oeffi cache <subcommand>
+oeffi config <subcommand>
+oeffi version
+oeffi help
 ```
 
 ## First run and updates
 
 - `oeffi init`: download raw data, merge feeds, build caches
 - `oeffi init --force`: same as above, but overwrites existing raw data
-- `oeffi cache-build --download`: refresh raw data and rebuild caches
+- `oeffi cache build --download`: refresh raw data and rebuild caches
 
 ## Compatibility
 
@@ -95,10 +113,8 @@ oeffi config list
 
 ## Limitations
 
-- No geocoding for arbitrary addresses yet
 - No realtime outage/delay integration yet
 - Local GTFS data can become stale and should be refreshed regularly
-- Merge/build logic assumes current GTFS structure
 
 ## Data sources
 
@@ -108,6 +124,9 @@ oeffi config list
 - ÖBB GTFS
   - Info: `https://data.oebb.at/de/datensaetze~soll-fahrplan-gtfs~`
   - ZIP: `https://static.web.oebb.at/open-data/soll-fahrplan-gtfs/GTFS_Fahrplan_2026.zip`
+- OSM Austria Map Data:
+  - INFO: `https://download.geofabrik.de/europe.html`
+  - DATA: `https://download.geofabrik.de/europe/austria-latest.osm.pbf`
 
 Merged dataset includes Wiener Linien feed plus scoped ÖBB commuter rail data around Vienna.
 
@@ -148,6 +167,9 @@ Config keys:
 - `oebb_source_dir`
 - `wiener_linien_gtfs_url`
 - `oebb_gtfs_url`
+- `austria_osm_pbf_path`
+- `austria_osm_pbf_url`
+- `geocode_cache_path`
 
 Environment overrides:
 
@@ -160,15 +182,16 @@ Environment overrides:
 - `OEFFI_OEBB_SOURCE_DIR`
 - `OEFFI_WIENER_LINIEN_GTFS_URL`
 - `OEFFI_OEBB_GTFS_URL`
+- `OEFFI_AUSTRIA_OSM_PBF_PATH`
+- `OEFFI_AUSTRIA_OSM_PBF_URL`
+- `OEFFI_GEOCODE_CACHE_PATH`
 
 By default paths are resolved using OS app directories (`directories::ProjectDirs`).
 
 ## TODO
 
-- Add geocoding support for arbitrary addresses
 - Add realtime data integration (outages, delays, disruptions)
 - Add better stale-data checks and refresh reminders
-- Improve resilience against GTFS schema changes
 
 ## License
 

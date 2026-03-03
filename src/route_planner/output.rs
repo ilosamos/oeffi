@@ -51,7 +51,7 @@ fn station_label(cache: &PlannerCache, station_idx: u32, debug: bool) -> String 
     }
 }
 
-fn print_option(cache: &PlannerCache, option: &RouteOption, debug: bool) {
+fn print_option(cache: &PlannerCache, option: &RouteOption, show_stop_ids: bool) {
     if option.access_secs > 0 {
         println!(
             "  Walk to start station: {}",
@@ -60,13 +60,17 @@ fn print_option(cache: &PlannerCache, option: &RouteOption, debug: bool) {
     }
     for (idx, leg) in option.legs.iter().enumerate() {
         let route = &cache.routes[leg.route_idx as usize];
+        let route_label = if show_stop_ids {
+            format!("{} [{}]", route.short_name, route.base_route_id)
+        } else {
+            route.short_name.clone()
+        };
         println!(
-            "  {}. Ride {} [{}] {} -> {}",
+            "  {}. Ride {} {} -> {}",
             idx + 1,
-            route.short_name,
-            route.base_route_id,
-            station_label(cache, leg.from_station_idx, debug),
-            station_label(cache, leg.to_station_idx, debug)
+            route_label,
+            station_label(cache, leg.from_station_idx, show_stop_ids),
+            station_label(cache, leg.to_station_idx, show_stop_ids)
         );
         println!(
             "     dep {} | arr {} | {} stops",
@@ -77,7 +81,7 @@ fn print_option(cache: &PlannerCache, option: &RouteOption, debug: bool) {
         if option.legs.get(idx + 1).is_some() {
             println!(
                 "     transfer at {}",
-                station_label(cache, leg.to_station_idx, debug)
+                station_label(cache, leg.to_station_idx, show_stop_ids)
             );
         }
     }
@@ -89,7 +93,12 @@ fn print_option(cache: &PlannerCache, option: &RouteOption, debug: bool) {
     }
 }
 
-pub fn print_route_plan(cache: &PlannerCache, result: &RoutePlanResult, debug: bool) {
+pub fn print_route_plan(
+    cache: &PlannerCache,
+    result: &RoutePlanResult,
+    debug: bool,
+    verbose: bool,
+) {
     println!(
         "Route plan: '{}' -> '{}'",
         result.from_query, result.to_query
@@ -190,7 +199,7 @@ pub fn print_route_plan(cache: &PlannerCache, result: &RoutePlanResult, debug: b
         generalized_cost: 0,
         legs: result.chosen_legs.clone(),
     };
-    print_option(cache, &chosen, debug);
+    print_option(cache, &chosen, verbose);
 
     if debug {
         println!("\nAlternatives (why not picked):");
@@ -212,7 +221,7 @@ pub fn print_route_plan(cache: &PlannerCache, result: &RoutePlanResult, debug: b
                     station_label_debug(cache, alt.from_idx),
                     station_label_debug(cache, alt.to_idx)
                 );
-                print_option(cache, alt, true);
+                print_option(cache, alt, verbose);
             }
         }
     }

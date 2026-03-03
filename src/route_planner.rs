@@ -195,6 +195,6 @@ pub fn cmd_route_plan(
 
     result.from_query = from_query.to_string();
     result.to_query = to_query.to_string();
-    output::print_route_plan(&cache, &result, debug);
+    output::print_route_plan(&cache, &result, debug, verbose);
     Ok(())
 }

@@ -16,22 +16,15 @@ pub const ENV_OEBB_SOURCE_DIR: &str = "OEFFI_OEBB_SOURCE_DIR";
 pub const ENV_WIENER_LINIEN_GTFS_URL: &str = "OEFFI_WIENER_LINIEN_GTFS_URL";
 pub const ENV_OEBB_GTFS_URL: &str = "OEFFI_OEBB_GTFS_URL";
 pub const ENV_AUSTRIA_OSM_PBF_PATH: &str = "OEFFI_AUSTRIA_OSM_PBF_PATH";
+pub const ENV_AUSTRIA_OSM_PBF_URL: &str = "OEFFI_AUSTRIA_OSM_PBF_URL";
 pub const ENV_GEOCODE_CACHE_PATH: &str = "OEFFI_GEOCODE_CACHE_PATH";
 
 const DEFAULT_WIENER_LINIEN_GTFS_URL: &str =
     "http://www.wienerlinien.at/ogd_realtime/doku/ogd/gtfs/gtfs.zip";
 const DEFAULT_OEBB_GTFS_URL: &str =
     "https://static.web.oebb.at/open-data/soll-fahrplan-gtfs/GTFS_Fahrplan_2026.zip";
-const DEFAULT_AUSTRIA_OSM_PBF_PATH: &str = "data/austria.osm.bpf";
-const DEFAULT_GEOCODE_CACHE_PATH: &str = "data/vienna-addresses.cache.bin";
-
-fn default_austria_osm_pbf_path() -> String {
-    DEFAULT_AUSTRIA_OSM_PBF_PATH.to_string()
-}
-
-fn default_geocode_cache_path() -> String {
-    DEFAULT_GEOCODE_CACHE_PATH.to_string()
-}
+const DEFAULT_AUSTRIA_OSM_PBF_URL: &str =
+    "https://download.geofabrik.de/europe/austria-latest.osm.pbf";
 
 #[derive(Debug, Clone)]
 pub struct AppPaths {
@@ -51,10 +44,16 @@ pub struct AppConfig {
     pub oebb_source_dir: String,
     pub wiener_linien_gtfs_url: String,
     pub oebb_gtfs_url: String,
-    #[serde(default = "default_austria_osm_pbf_path")]
+    #[serde(default)]
     pub austria_osm_pbf_path: String,
-    #[serde(default = "default_geocode_cache_path")]
+    #[serde(default = "default_austria_osm_pbf_url")]
+    pub austria_osm_pbf_url: String,
+    #[serde(default)]
     pub geocode_cache_path: String,
+}
+
+fn default_austria_osm_pbf_url() -> String {
+    DEFAULT_AUSTRIA_OSM_PBF_URL.to_string()
 }
 
 #[derive(Debug, Clone)]
@@ -105,8 +104,9 @@ fn default_config(paths: &AppPaths) -> AppConfig {
         oebb_source_dir: as_string(&oebb_source_dir),
         wiener_linien_gtfs_url: DEFAULT_WIENER_LINIEN_GTFS_URL.to_string(),
         oebb_gtfs_url: DEFAULT_OEBB_GTFS_URL.to_string(),
-        austria_osm_pbf_path: DEFAULT_AUSTRIA_OSM_PBF_PATH.to_string(),
-        geocode_cache_path: DEFAULT_GEOCODE_CACHE_PATH.to_string(),
+        austria_osm_pbf_path: as_string(&raw_root.join("austria.osm.pbf")),
+        austria_osm_pbf_url: DEFAULT_AUSTRIA_OSM_PBF_URL.to_string(),
+        geocode_cache_path: as_string(&paths.cache_dir.join("geocode.cache.bin")),
     }
 }
 
@@ -212,6 +212,11 @@ fn apply_env_overrides(config: &mut AppConfig) -> HashSet<&'static str> {
         &mut overrides,
     );
     apply_env_override(
+        &mut config.austria_osm_pbf_url,
+        ENV_AUSTRIA_OSM_PBF_URL,
+        &mut overrides,
+    );
+    apply_env_override(
         &mut config.geocode_cache_path,
         ENV_GEOCODE_CACHE_PATH,
         &mut overrides,
@@ -250,6 +255,14 @@ pub fn load_or_init_config() -> Result<LoadedConfig, String> {
         defaults.clone()
     };
 
+    let mut file_config = file_config;
+    if file_config.austria_osm_pbf_path.trim().is_empty() {
+        file_config.austria_osm_pbf_path = defaults.austria_osm_pbf_path.clone();
+    }
+    if file_config.geocode_cache_path.trim().is_empty() {
+        file_config.geocode_cache_path = defaults.geocode_cache_path.clone();
+    }
+
     ensure_parent_dirs(&paths, &file_config)?;
 
     let mut effective_config = file_config.clone();
@@ -278,6 +291,7 @@ pub fn config_keys() -> &'static [&'static str] {
         "wiener_linien_gtfs_url",
         "oebb_gtfs_url",
         "austria_osm_pbf_path",
+        "austria_osm_pbf_url",
         "geocode_cache_path",
     ]
 }
@@ -293,6 +307,7 @@ pub fn env_var_for_key(key: &str) -> Option<&'static str> {
         "wiener_linien_gtfs_url" => Some(ENV_WIENER_LINIEN_GTFS_URL),
         "oebb_gtfs_url" => Some(ENV_OEBB_GTFS_URL),
         "austria_osm_pbf_path" => Some(ENV_AUSTRIA_OSM_PBF_PATH),
+        "austria_osm_pbf_url" => Some(ENV_AUSTRIA_OSM_PBF_URL),
         "geocode_cache_path" => Some(ENV_GEOCODE_CACHE_PATH),
         _ => None,
     }
@@ -309,6 +324,7 @@ pub fn get_config_value<'a>(cfg: &'a AppConfig, key: &str) -> Option<&'a str> {
         "wiener_linien_gtfs_url" => Some(&cfg.wiener_linien_gtfs_url),
         "oebb_gtfs_url" => Some(&cfg.oebb_gtfs_url),
         "austria_osm_pbf_path" => Some(&cfg.austria_osm_pbf_path),
+        "austria_osm_pbf_url" => Some(&cfg.austria_osm_pbf_url),
         "geocode_cache_path" => Some(&cfg.geocode_cache_path),
         _ => None,
     }
@@ -329,6 +345,7 @@ pub fn set_config_value(cfg: &mut AppConfig, key: &str, value: String) -> Result
         "wiener_linien_gtfs_url" => cfg.wiener_linien_gtfs_url = value,
         "oebb_gtfs_url" => cfg.oebb_gtfs_url = value,
         "austria_osm_pbf_path" => cfg.austria_osm_pbf_path = value,
+        "austria_osm_pbf_url" => cfg.austria_osm_pbf_url = value,
         "geocode_cache_path" => cfg.geocode_cache_path = value,
         _ => {
             return Err(format!(

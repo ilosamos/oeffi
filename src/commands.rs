@@ -8,7 +8,7 @@ use crate::config::{
     AppConfig, LoadedConfig, config_keys, default_file_config, ensure_dirs_for_config,
     env_var_for_key, get_config_value, persist_file_config, set_config_value,
 };
-use crate::download::download_gtfs_zip_to_dir;
+use crate::download::{download_file_to_path, download_gtfs_zip_to_dir};
 use crate::geocode;
 use crate::matcher::{
     GENERIC_QUERY_TOKENS, NameMatchMode, exact_key_case_insensitive, match_name_candidates,
@@ -19,7 +19,6 @@ use crate::route_planner::rebuild_planner_cache;
 use crate::snapshot::{StopCluster, StopRecord};
 
 const STOP_FUZZY_THRESHOLD: f64 = 0.94;
-const DEFAULT_VIENNA_POLYGON_PATH: &str = "data/poly.json";
 
 pub fn cmd_cache_build(
     config: &AppConfig,
@@ -35,6 +34,12 @@ pub fn cmd_cache_build(
         ensure_raw_sources_exist(config).map_err(|err| {
             format!("{err}\nHint: run `oeffi cache build --download` for first-time setup.")
         })?;
+        if !Path::new(&config.austria_osm_pbf_path).exists() {
+            return Err(format!(
+                "Missing OSM PBF map data '{}'. Hint: run `oeffi cache build --download` to fetch it.",
+                config.austria_osm_pbf_path
+            ));
+        }
     }
 
     eprintln!("Preprocessing raw GTFS data (merge) ...");
@@ -50,11 +55,7 @@ pub fn cmd_cache_build(
     eprintln!("Rebuilding planner cache: {planner_cache_path}");
     let planner = rebuild_planner_cache(source_path, planner_cache_path)?;
     eprintln!("Rebuilding geocode cache: {}", config.geocode_cache_path);
-    geocode::cmd_geocode_build(
-        &config.austria_osm_pbf_path,
-        DEFAULT_VIENNA_POLYGON_PATH,
-        &config.geocode_cache_path,
-    )?;
+    geocode::cmd_geocode_build(&config.austria_osm_pbf_path, &config.geocode_cache_path)?;
 
     println!("Built snapshot cache: {cache_path}");
     println!("  source: {}", snapshot.fingerprint.source_path);
@@ -675,6 +676,11 @@ fn download_raw_data(config: &AppConfig, replace_existing: bool) -> Result<(), S
         "Wiener Linien",
     )?;
     download_gtfs_zip_to_dir(&config.oebb_gtfs_url, &config.oebb_source_dir, "ÖBB")?;
+    download_file_to_path(
+        &config.austria_osm_pbf_url,
+        &config.austria_osm_pbf_path,
+        "Austria OSM PBF",
+    )?;
     Ok(())
 }
 

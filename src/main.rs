@@ -78,10 +78,15 @@ fn run(command: Command) -> ExitCode {
         Ok(()) => ExitCode::SUCCESS,
         Err(message) => {
             eprintln!("Error: {message}");
+            if message.to_ascii_lowercase().contains("cache") && !message.contains("Hint:") {
+                eprintln!(
+                    "Hint: run `oeffi cache build --download` to rebuild and refresh local caches."
+                );
+            }
             if commands::is_missing_local_data_error(&message) && !message.contains("Hint:") {
                 eprintln!("Hint: run `oeffi init` for first-time setup.");
                 eprintln!(
-                    "Hint: or run `oeffi cache build --download` to fetch raw GTFS data and rebuild caches."
+                    "Hint: or run `oeffi cache build --download` to fetch raw GTFS + map data and rebuild caches."
                 );
             }
             eprintln!("Run `oeffi help` for usage.");

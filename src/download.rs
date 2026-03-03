@@ -92,6 +92,39 @@ fn download_bytes(url: &str) -> Result<(Vec<u8>, Option<String>), String> {
     Ok((bytes, content_type))
 }
 
+pub fn download_file_to_path(url: &str, target_path: &str, label: &str) -> Result<(), String> {
+    let target = Path::new(target_path);
+    if let Some(parent) = target.parent() {
+        fs::create_dir_all(parent)
+            .map_err(|err| format!("Failed creating directory '{}': {err}", parent.display()))?;
+    }
+
+    let tmp_path = target.with_extension("download_tmp");
+    if tmp_path.exists() {
+        let _ = fs::remove_file(&tmp_path);
+    }
+
+    eprintln!("Downloading {label} from {url} ...");
+    let response = ureq::get(url)
+        .call()
+        .map_err(|err| format!("Failed to download '{url}': {err}"))?;
+    let mut reader = response.into_reader();
+    let mut out = fs::File::create(&tmp_path)
+        .map_err(|err| format!("Failed creating file '{}': {err}", tmp_path.display()))?;
+    std::io::copy(&mut reader, &mut out)
+        .map_err(|err| format!("Failed writing file '{}': {err}", tmp_path.display()))?;
+
+    fs::rename(&tmp_path, target).map_err(|err| {
+        format!(
+            "Failed replacing '{}' with downloaded file '{}': {err}",
+            target.display(),
+            tmp_path.display()
+        )
+    })?;
+
+    Ok(())
+}
+
 fn has_required_gtfs_files(dir: &Path) -> bool {
     REQUIRED_GTFS_FILES
         .iter()
