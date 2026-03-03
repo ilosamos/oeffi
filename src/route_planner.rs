@@ -181,16 +181,38 @@ pub fn cmd_route_plan(
             EndpointResolution::Geocode { lat, lon, .. } => (lat, lon),
         };
 
-        query::plan_route_from_coords(
-            &cache,
-            from_lat,
-            from_lon,
-            to_lat,
-            to_lon,
-            alternatives,
-            depart_secs,
-            service_date,
-        )?
+        if !from_station_idxs.is_empty() && to_station_idxs.is_empty() {
+            query::plan_route_from_origin_stations_to_coords(
+                &cache,
+                &from_station_idxs,
+                to_lat,
+                to_lon,
+                alternatives,
+                depart_secs,
+                service_date,
+            )?
+        } else if from_station_idxs.is_empty() && !to_station_idxs.is_empty() {
+            query::plan_route_from_coords_to_destination_stations(
+                &cache,
+                from_lat,
+                from_lon,
+                &to_station_idxs,
+                alternatives,
+                depart_secs,
+                service_date,
+            )?
+        } else {
+            query::plan_route_from_coords(
+                &cache,
+                from_lat,
+                from_lon,
+                to_lat,
+                to_lon,
+                alternatives,
+                depart_secs,
+                service_date,
+            )?
+        }
     };
 
     result.from_query = from_query.to_string();

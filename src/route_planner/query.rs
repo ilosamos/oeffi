@@ -84,6 +84,21 @@ fn nearest_station_candidates(
     candidates
 }
 
+fn station_candidates_from_idxs(station_idxs: &[u32]) -> Vec<StationCandidate> {
+    let mut out: Vec<StationCandidate> = Vec::with_capacity(station_idxs.len());
+    for station_idx in station_idxs {
+        if out.iter().any(|c| c.station_idx == *station_idx) {
+            continue;
+        }
+        out.push(StationCandidate {
+            station_idx: *station_idx,
+            walk_secs: 0,
+            distance_meters: 0.0,
+        });
+    }
+    out
+}
+
 pub fn match_station_idxs(cache: &PlannerCache, query: &str) -> Vec<u32> {
     if let Some(idx) = cache.station_idx_by_key.get(query).copied() {
         return vec![idx];
@@ -397,15 +412,16 @@ pub fn plan_route(
 }
 
 #[allow(clippy::too_many_arguments)]
-pub fn plan_route_from_coords(
+fn plan_route_from_station_candidates(
     cache: &PlannerCache,
-    from_lat: f64,
-    from_lon: f64,
-    to_lat: f64,
-    to_lon: f64,
+    from_candidates: &[StationCandidate],
+    to_candidates: &[StationCandidate],
     alternatives: usize,
     depart_secs_override: Option<usize>,
     query_date_override: Option<NaiveDate>,
+    from_query: String,
+    to_query: String,
+    no_route_context: String,
 ) -> Result<RoutePlanResult, String> {
     let now = Local::now();
     let query_date = query_date_override.unwrap_or(now.date_naive());
@@ -414,33 +430,6 @@ pub fn plan_route_from_coords(
         (None, Some(_)) => 0,
         (None, None) => now.time().num_seconds_from_midnight() as usize,
     };
-
-    let from_candidates = nearest_station_candidates(
-        cache,
-        from_lat,
-        from_lon,
-        MAX_COORD_CANDIDATES,
-        MAX_ACCESS_DISTANCE_METERS,
-    );
-    if from_candidates.is_empty() {
-        return Err(format!(
-            "No origin stations found within {:.0}m of {}, {}.",
-            MAX_ACCESS_DISTANCE_METERS, from_lat, from_lon
-        ));
-    }
-    let to_candidates = nearest_station_candidates(
-        cache,
-        to_lat,
-        to_lon,
-        MAX_COORD_CANDIDATES,
-        MAX_ACCESS_DISTANCE_METERS,
-    );
-    if to_candidates.is_empty() {
-        return Err(format!(
-            "No destination stations found within {:.0}m of {}, {}.",
-            MAX_ACCESS_DISTANCE_METERS, to_lat, to_lon
-        ));
-    }
 
     let from_station_idxs: Vec<u32> = from_candidates.iter().map(|c| c.station_idx).collect();
     let to_station_idxs: Vec<u32> = to_candidates.iter().map(|c| c.station_idx).collect();
@@ -455,8 +444,8 @@ pub fn plan_route_from_coords(
     let mut pair_stats: Vec<EvaluatedPair> = Vec::new();
     let mut all_options: Vec<RouteOption> = Vec::new();
 
-    for from_candidate in &from_candidates {
-        for to_candidate in &to_candidates {
+    for from_candidate in from_candidates {
+        for to_candidate in to_candidates {
             let effective_depart = depart_secs.saturating_add(from_candidate.walk_secs);
             let journeys = timetable.raptor(
                 MAX_TRANSFERS,
@@ -558,11 +547,7 @@ pub fn plan_route_from_coords(
 
     let Some(best) = best else {
         return Err(format!(
-            "No route found from ({}, {}) to ({}, {}) for {} after {:02}:{:02}.",
-            from_lat,
-            from_lon,
-            to_lat,
-            to_lon,
+            "No route found {no_route_context} for {} after {:02}:{:02}.",
             query_date,
             depart_secs / 3600,
             (depart_secs % 3600) / 60
@@ -589,8 +574,8 @@ pub fn plan_route_from_coords(
         .collect();
 
     Ok(RoutePlanResult {
-        from_query: format!("{from_lat:.6},{from_lon:.6}"),
-        to_query: format!("{to_lat:.6},{to_lon:.6}"),
+        from_query,
+        to_query,
         query_date: query_date.to_string(),
         depart_secs,
         arrival_secs: best.adjusted_arrival,
@@ -604,6 +589,139 @@ pub fn plan_route_from_coords(
         evaluated_pairs: pair_stats,
         alternatives,
     })
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn plan_route_from_coords(
+    cache: &PlannerCache,
+    from_lat: f64,
+    from_lon: f64,
+    to_lat: f64,
+    to_lon: f64,
+    alternatives: usize,
+    depart_secs_override: Option<usize>,
+    query_date_override: Option<NaiveDate>,
+) -> Result<RoutePlanResult, String> {
+    let from_candidates = nearest_station_candidates(
+        cache,
+        from_lat,
+        from_lon,
+        MAX_COORD_CANDIDATES,
+        MAX_ACCESS_DISTANCE_METERS,
+    );
+    if from_candidates.is_empty() {
+        return Err(format!(
+            "No origin stations found within {:.0}m of {}, {}.",
+            MAX_ACCESS_DISTANCE_METERS, from_lat, from_lon
+        ));
+    }
+    let to_candidates = nearest_station_candidates(
+        cache,
+        to_lat,
+        to_lon,
+        MAX_COORD_CANDIDATES,
+        MAX_ACCESS_DISTANCE_METERS,
+    );
+    if to_candidates.is_empty() {
+        return Err(format!(
+            "No destination stations found within {:.0}m of {}, {}.",
+            MAX_ACCESS_DISTANCE_METERS, to_lat, to_lon
+        ));
+    }
+
+    plan_route_from_station_candidates(
+        cache,
+        &from_candidates,
+        &to_candidates,
+        alternatives,
+        depart_secs_override,
+        query_date_override,
+        format!("{from_lat:.6},{from_lon:.6}"),
+        format!("{to_lat:.6},{to_lon:.6}"),
+        format!("from ({from_lat}, {from_lon}) to ({to_lat}, {to_lon})"),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn plan_route_from_origin_stations_to_coords(
+    cache: &PlannerCache,
+    from_station_idxs: &[u32],
+    to_lat: f64,
+    to_lon: f64,
+    alternatives: usize,
+    depart_secs_override: Option<usize>,
+    query_date_override: Option<NaiveDate>,
+) -> Result<RoutePlanResult, String> {
+    let from_candidates = station_candidates_from_idxs(from_station_idxs);
+    if from_candidates.is_empty() {
+        return Err("No origin station candidates available.".to_string());
+    }
+    let to_candidates = nearest_station_candidates(
+        cache,
+        to_lat,
+        to_lon,
+        MAX_COORD_CANDIDATES,
+        MAX_ACCESS_DISTANCE_METERS,
+    );
+    if to_candidates.is_empty() {
+        return Err(format!(
+            "No destination stations found within {:.0}m of {}, {}.",
+            MAX_ACCESS_DISTANCE_METERS, to_lat, to_lon
+        ));
+    }
+
+    plan_route_from_station_candidates(
+        cache,
+        &from_candidates,
+        &to_candidates,
+        alternatives,
+        depart_secs_override,
+        query_date_override,
+        "<matched origin station>".to_string(),
+        format!("{to_lat:.6},{to_lon:.6}"),
+        format!("from matched origin station(s) to ({to_lat}, {to_lon})"),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn plan_route_from_coords_to_destination_stations(
+    cache: &PlannerCache,
+    from_lat: f64,
+    from_lon: f64,
+    to_station_idxs: &[u32],
+    alternatives: usize,
+    depart_secs_override: Option<usize>,
+    query_date_override: Option<NaiveDate>,
+) -> Result<RoutePlanResult, String> {
+    let from_candidates = nearest_station_candidates(
+        cache,
+        from_lat,
+        from_lon,
+        MAX_COORD_CANDIDATES,
+        MAX_ACCESS_DISTANCE_METERS,
+    );
+    if from_candidates.is_empty() {
+        return Err(format!(
+            "No origin stations found within {:.0}m of {}, {}.",
+            MAX_ACCESS_DISTANCE_METERS, from_lat, from_lon
+        ));
+    }
+    let to_candidates = station_candidates_from_idxs(to_station_idxs);
+    if to_candidates.is_empty() {
+        return Err("No destination station candidates available.".to_string());
+    }
+
+    plan_route_from_station_candidates(
+        cache,
+        &from_candidates,
+        &to_candidates,
+        alternatives,
+        depart_secs_override,
+        query_date_override,
+        format!("{from_lat:.6},{from_lon:.6}"),
+        "<matched destination station>".to_string(),
+        format!("from ({from_lat}, {from_lon}) to matched destination station(s)"),
+    )
 }
 
 #[cfg(test)]
