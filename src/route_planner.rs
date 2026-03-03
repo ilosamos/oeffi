@@ -11,6 +11,16 @@ use chrono::NaiveDate;
 
 pub use cache::rebuild_planner_cache;
 
+pub struct RoutePlanRequest<'a> {
+    pub from_query: &'a str,
+    pub to_query: &'a str,
+    pub debug: bool,
+    pub verbose: bool,
+    pub alternatives: usize,
+    pub depart_secs: Option<usize>,
+    pub service_date: Option<NaiveDate>,
+}
+
 #[derive(Debug, Clone)]
 enum EndpointResolution {
     Coord { lat: f64, lon: f64 },
@@ -87,16 +97,17 @@ fn resolve_endpoint(
     }
 }
 
-pub fn cmd_route_plan(
-    config: &AppConfig,
-    from_query: &str,
-    to_query: &str,
-    debug: bool,
-    verbose: bool,
-    alternatives: usize,
-    depart_secs: Option<usize>,
-    service_date: Option<NaiveDate>,
-) -> Result<(), String> {
+pub fn cmd_route_plan(config: &AppConfig, request: RoutePlanRequest<'_>) -> Result<(), String> {
+    let RoutePlanRequest {
+        from_query,
+        to_query,
+        debug,
+        verbose,
+        alternatives,
+        depart_secs,
+        service_date,
+    } = request;
+
     ensure_combined_source_ready(
         &config.merged_gtfs_path,
         &config.wiener_linien_source_dir,

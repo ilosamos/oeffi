@@ -245,10 +245,10 @@ fn collect_way_nodes(
     let mut out: HashMap<WayId, Vec<NodeId>> = HashMap::new();
     for obj in reader.iter() {
         let obj = obj.map_err(|err| format!("Failed while scanning ways in '{pbf_path}': {err}"))?;
-        if let OsmObj::Way(way) = obj {
-            if target_way_ids.contains(&way.id) {
-                out.insert(way.id, way.nodes);
-            }
+        if let OsmObj::Way(way) = obj
+            && target_way_ids.contains(&way.id)
+        {
+            out.insert(way.id, way.nodes);
         }
     }
     Ok(out)
@@ -269,10 +269,10 @@ fn collect_node_coords(
     let mut out: HashMap<NodeId, (f64, f64)> = HashMap::new();
     for obj in reader.iter() {
         let obj = obj.map_err(|err| format!("Failed while scanning nodes in '{pbf_path}': {err}"))?;
-        if let OsmObj::Node(node) = obj {
-            if target_node_ids.contains(&node.id) {
-                out.insert(node.id, (node.lat(), node.lon()));
-            }
+        if let OsmObj::Node(node) = obj
+            && target_node_ids.contains(&node.id)
+        {
+            out.insert(node.id, (node.lat(), node.lon()));
         }
     }
     Ok(out)
@@ -557,8 +557,8 @@ pub fn cmd_geocode_build(pbf_path: &str, out_path: &str) -> Result<(), String> {
         .collect();
 
     let mut landmarks: Vec<LandmarkRecord> = landmarks_by_key
-        .into_iter()
-        .map(|(_, agg)| agg.to_record())
+        .into_values()
+        .map(|agg| agg.to_record())
         .collect();
 
     records.sort_by(|a, b| a.normalized_key.cmp(&b.normalized_key));
