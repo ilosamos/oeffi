@@ -42,7 +42,7 @@ oeffi route-coords 48.2066 16.3707 48.1850 16.3747
 - Blazingly fast route planning and data inspection
 - Local caches, no external planner API
 - Can be easily integrated as agent skill
-- Built on `[raptor-rs](https://github.com/keogami/raptor-rs)` for RAPTOR-based route planning
+- Built on [`raptor-rs`](https://github.com/keogami/raptor-rs) for RAPTOR-based route planning
 
 ## Install
 
