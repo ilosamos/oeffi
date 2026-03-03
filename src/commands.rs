@@ -20,10 +20,7 @@ use crate::snapshot::{StopCluster, StopRecord};
 
 const STOP_FUZZY_THRESHOLD: f64 = 0.94;
 
-pub fn cmd_cache_build(
-    config: &AppConfig,
-    download: bool,
-) -> Result<(), String> {
+pub fn cmd_cache_build(config: &AppConfig, download: bool) -> Result<(), String> {
     let source_path = &config.merged_gtfs_path;
     let cache_path = &config.snapshot_cache_path;
     let planner_cache_path = &config.planner_cache_path;
@@ -160,7 +157,10 @@ pub fn cmd_gtfs_summary(config: &AppConfig) -> Result<(), String> {
     println!("  calendars: {}", snapshot.summary.calendars);
     println!("  calendar_dates: {}", snapshot.summary.calendar_dates);
 
-    println!("Geo data summary (via cache: {})", config.geocode_cache_path);
+    println!(
+        "Geo data summary (via cache: {})",
+        config.geocode_cache_path
+    );
     match geocode::load_summary(&config.geocode_cache_path) {
         Ok(summary) => {
             println!("  cache_version: {}", summary.version);
@@ -652,9 +652,7 @@ pub fn cmd_config_reset(loaded: &LoadedConfig) -> Result<(), String> {
         loaded.paths.config_path.display()
     );
     if !loaded.env_overrides.is_empty() {
-        println!(
-            "Note: one or more values may still be overridden by environment variables."
-        );
+        println!("Note: one or more values may still be overridden by environment variables.");
     }
     Ok(())
 }

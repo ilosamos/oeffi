@@ -23,8 +23,15 @@ pub struct RoutePlanRequest<'a> {
 
 #[derive(Debug, Clone)]
 enum EndpointResolution {
-    Coord { lat: f64, lon: f64 },
-    Station { station_name: String, lat: f64, lon: f64 },
+    Coord {
+        lat: f64,
+        lon: f64,
+    },
+    Station {
+        station_name: String,
+        lat: f64,
+        lon: f64,
+    },
     Geocode {
         label: String,
         lat: f64,

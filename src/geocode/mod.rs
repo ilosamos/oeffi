@@ -13,9 +13,11 @@ use osmpbfreader::{NodeId, OsmId, OsmObj, OsmPbfReader, WayId};
 use strsim::levenshtein;
 
 use self::model::{
-    AddressRecord, GeocodeBuildStats, GeocodeCache, LandmarkRecord, GEOCODE_CACHE_VERSION,
+    AddressRecord, GEOCODE_CACHE_VERSION, GeocodeBuildStats, GeocodeCache, LandmarkRecord,
 };
-use self::normalize::{canonical_street, normalize_ascii, normalized_address_key, strip_house_number_unit};
+use self::normalize::{
+    canonical_street, normalize_ascii, normalized_address_key, strip_house_number_unit,
+};
 
 const EMBEDDED_VIENNA_POLYGON_PATH: &str = "embedded:assets/vienna-polygon.json";
 const EMBEDDED_VIENNA_POLYGON_GEOJSON: &str = include_str!("../../assets/vienna-polygon.json");
@@ -179,7 +181,9 @@ fn load_polygon_from_geojson(raw: &str, label: &str) -> Result<MultiPolygon<f64>
     Ok(MultiPolygon(polygons))
 }
 
-fn address_tags(tags: &osmpbfreader::Tags) -> Option<(String, String, Option<String>, Option<String>)> {
+fn address_tags(
+    tags: &osmpbfreader::Tags,
+) -> Option<(String, String, Option<String>, Option<String>)> {
     let street = tags.get("addr:street")?.trim();
     let house_raw = tags.get("addr:housenumber")?.trim();
     if street.is_empty() || house_raw.is_empty() {
@@ -244,7 +248,8 @@ fn collect_way_nodes(
 
     let mut out: HashMap<WayId, Vec<NodeId>> = HashMap::new();
     for obj in reader.iter() {
-        let obj = obj.map_err(|err| format!("Failed while scanning ways in '{pbf_path}': {err}"))?;
+        let obj =
+            obj.map_err(|err| format!("Failed while scanning ways in '{pbf_path}': {err}"))?;
         if let OsmObj::Way(way) = obj
             && target_way_ids.contains(&way.id)
         {
@@ -268,7 +273,8 @@ fn collect_node_coords(
 
     let mut out: HashMap<NodeId, (f64, f64)> = HashMap::new();
     for obj in reader.iter() {
-        let obj = obj.map_err(|err| format!("Failed while scanning nodes in '{pbf_path}': {err}"))?;
+        let obj =
+            obj.map_err(|err| format!("Failed while scanning nodes in '{pbf_path}': {err}"))?;
         if let OsmObj::Node(node) = obj
             && target_node_ids.contains(&node.id)
         {
@@ -326,17 +332,23 @@ fn push_landmark_sample(
 
 fn save_cache(path: &str, cache: &GeocodeCache) -> Result<(), String> {
     if let Some(parent) = Path::new(path).parent() {
-        fs::create_dir_all(parent)
-            .map_err(|err| format!("Failed to create cache directory '{}': {err}", parent.display()))?;
+        fs::create_dir_all(parent).map_err(|err| {
+            format!(
+                "Failed to create cache directory '{}': {err}",
+                parent.display()
+            )
+        })?;
     }
-    let file = File::create(path).map_err(|err| format!("Failed to create geocode cache '{path}': {err}"))?;
+    let file = File::create(path)
+        .map_err(|err| format!("Failed to create geocode cache '{path}': {err}"))?;
     let mut writer = BufWriter::new(file);
     bincode::serialize_into(&mut writer, cache)
         .map_err(|err| format!("Failed to serialize geocode cache '{path}': {err}"))
 }
 
 fn load_cache(path: &str) -> Result<GeocodeCache, String> {
-    let file = File::open(path).map_err(|err| format!("Failed to open geocode cache '{path}': {err}"))?;
+    let file =
+        File::open(path).map_err(|err| format!("Failed to open geocode cache '{path}': {err}"))?;
     let mut reader = BufReader::new(file);
     let cache: GeocodeCache = bincode::deserialize_from(&mut reader)
         .map_err(|err| format!("Failed to deserialize geocode cache '{path}': {err}"))?;
@@ -351,11 +363,14 @@ fn load_cache(path: &str) -> Result<GeocodeCache, String> {
 
 pub fn cmd_geocode_build(pbf_path: &str, out_path: &str) -> Result<(), String> {
     eprintln!("Loading embedded Vienna polygon ({EMBEDDED_VIENNA_POLYGON_PATH}) ...");
-    let polygon =
-        load_polygon_from_geojson(EMBEDDED_VIENNA_POLYGON_GEOJSON, EMBEDDED_VIENNA_POLYGON_PATH)?;
+    let polygon = load_polygon_from_geojson(
+        EMBEDDED_VIENNA_POLYGON_GEOJSON,
+        EMBEDDED_VIENNA_POLYGON_PATH,
+    )?;
 
     eprintln!("Scanning OSM PBF from {pbf_path} ...");
-    let file = File::open(pbf_path).map_err(|err| format!("Failed to open PBF '{pbf_path}': {err}"))?;
+    let file =
+        File::open(pbf_path).map_err(|err| format!("Failed to open PBF '{pbf_path}': {err}"))?;
     let mut reader = OsmPbfReader::new(file);
 
     let mut stats = GeocodeBuildStats {
@@ -581,13 +596,19 @@ pub fn cmd_geocode_build(pbf_path: &str, out_path: &str) -> Result<(), String> {
     println!("Built geocode cache: {out_path}");
     println!("  unique addresses: {}", cache.stats.unique_addresses);
     println!("  unique landmarks: {}", cache.stats.unique_landmarks);
-    println!("  addr nodes in polygon: {}", cache.stats.addr_nodes_in_polygon);
+    println!(
+        "  addr nodes in polygon: {}",
+        cache.stats.addr_nodes_in_polygon
+    );
     println!("  addr nodes total: {}", cache.stats.addr_nodes_total);
     println!(
         "  landmark nodes in polygon: {}",
         cache.stats.landmark_nodes_in_polygon
     );
-    println!("  landmark nodes total: {}", cache.stats.landmark_nodes_total);
+    println!(
+        "  landmark nodes total: {}",
+        cache.stats.landmark_nodes_total
+    );
     println!(
         "  landmark ways in polygon: {}",
         cache.stats.landmark_ways_in_polygon
@@ -601,7 +622,10 @@ pub fn cmd_geocode_build(pbf_path: &str, out_path: &str) -> Result<(), String> {
         "  landmark relations total: {}",
         cache.stats.landmark_relations_total
     );
-    println!("  addr ways total (not indexed yet): {}", cache.stats.addr_ways_total);
+    println!(
+        "  addr ways total (not indexed yet): {}",
+        cache.stats.addr_ways_total
+    );
     println!(
         "  addr relations total (not indexed yet): {}",
         cache.stats.addr_relations_total
@@ -728,7 +752,8 @@ fn street_match_kind(query_street: &str, record_street: &str) -> Option<StreetMa
     if record_street_norm == query_street {
         return Some(StreetMatch::Exact);
     }
-    if record_street_norm.starts_with(query_street) || query_street.starts_with(&record_street_norm) {
+    if record_street_norm.starts_with(query_street) || query_street.starts_with(&record_street_norm)
+    {
         return Some(StreetMatch::Fuzzy);
     }
 
@@ -754,7 +779,9 @@ fn house_match_kind(query_house: &ParsedHouse, record_house_raw: &str) -> Option
         record_house.digits.as_deref(),
         record_house.suffix.as_deref(),
     ) {
-        (Some(qd), None, Some(rd), Some(rs)) if qd == rd && !rs.is_empty() => Some(HouseMatch::Family),
+        (Some(qd), None, Some(rd), Some(rs)) if qd == rd && !rs.is_empty() => {
+            Some(HouseMatch::Family)
+        }
         _ => None,
     }
 }
@@ -859,7 +886,10 @@ pub fn load_summary(cache_path: &str) -> Result<GeocodeSummary, String> {
     })
 }
 
-fn sorted_address_matches<'a>(cache: &'a GeocodeCache, parsed_query: &ParsedQuery) -> Vec<&'a AddressRecord> {
+fn sorted_address_matches<'a>(
+    cache: &'a GeocodeCache,
+    parsed_query: &ParsedQuery,
+) -> Vec<&'a AddressRecord> {
     let mut matches: Vec<(u8, &AddressRecord)> = cache
         .addresses
         .iter()
@@ -876,7 +906,10 @@ fn sorted_address_matches<'a>(cache: &'a GeocodeCache, parsed_query: &ParsedQuer
     matches.into_iter().map(|(_, r)| r).collect()
 }
 
-fn sorted_landmark_matches<'a>(cache: &'a GeocodeCache, query_norm: &str) -> Vec<&'a LandmarkRecord> {
+fn sorted_landmark_matches<'a>(
+    cache: &'a GeocodeCache,
+    query_norm: &str,
+) -> Vec<&'a LandmarkRecord> {
     let strict_landmark_matches: Vec<(u8, &LandmarkRecord)> = cache
         .landmarks
         .iter()
@@ -918,8 +951,8 @@ fn sorted_landmark_matches<'a>(cache: &'a GeocodeCache, query_norm: &str) -> Vec
 
 pub fn lookup_first(cache_path: &str, query: &str) -> Result<Option<GeocodeLookupHit>, String> {
     let cache = load_cache(cache_path)?;
-    let parsed_query = parse_query(query)
-        .ok_or_else(|| "query normalizes to empty string".to_string())?;
+    let parsed_query =
+        parse_query(query).ok_or_else(|| "query normalizes to empty string".to_string())?;
     let query_norm = normalize_ascii(query);
 
     let address_matches = sorted_address_matches(&cache, &parsed_query);
@@ -951,8 +984,8 @@ pub fn cmd_geocode_find(cache_path: &str, query: &str, limit: usize) -> Result<(
         return Err("--limit must be > 0".to_string());
     }
 
-    let parsed_query = parse_query(query)
-        .ok_or_else(|| "query normalizes to empty string".to_string())?;
+    let parsed_query =
+        parse_query(query).ok_or_else(|| "query normalizes to empty string".to_string())?;
 
     let matches = sorted_address_matches(&cache, &parsed_query);
 
@@ -983,9 +1016,7 @@ pub fn cmd_geocode_find(cache_path: &str, query: &str, limit: usize) -> Result<(
     }
 
     if !landmark_matches.is_empty() {
-        println!(
-            "Landmark matches for '{query}' (normalized: '{query_norm}') in {cache_path}:"
-        );
+        println!("Landmark matches for '{query}' (normalized: '{query_norm}') in {cache_path}:");
 
         for (idx, record) in landmark_matches.into_iter().take(limit).enumerate() {
             println!(
@@ -1056,7 +1087,10 @@ mod tests {
 
         let out = ranked(&records, "prinz-eugen-straße 2");
         assert_eq!(out[0].house_number, "2");
-        assert!(out.iter().all(|r| r.house_number != "24" && r.house_number != "28"));
+        assert!(
+            out.iter()
+                .all(|r| r.house_number != "24" && r.house_number != "28")
+        );
     }
 
     #[test]

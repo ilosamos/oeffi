@@ -107,7 +107,9 @@ enum CliCommand {
         #[arg(long = "date", value_name = "YYYY-MM-DD", value_parser = parse_service_date)]
         service_date: Option<NaiveDate>,
     },
-    #[command(about = "Find coordinates for addresses, landmarks, restaurants, and other named places")]
+    #[command(
+        about = "Find coordinates for addresses, landmarks, restaurants, and other named places"
+    )]
     Geocode {
         query: String,
         #[arg(long = "cache", default_value = "data/vienna-addresses.cache.bin")]

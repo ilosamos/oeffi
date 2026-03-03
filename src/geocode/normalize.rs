@@ -1,9 +1,5 @@
 pub fn strip_house_number_unit(raw: &str) -> String {
-    let head = raw
-        .split([';', ','])
-        .next()
-        .unwrap_or("")
-        .trim();
+    let head = raw.split([';', ',']).next().unwrap_or("").trim();
     if head.is_empty() {
         return String::new();
     }
