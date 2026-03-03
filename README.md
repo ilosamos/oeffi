@@ -55,7 +55,7 @@ Download the archive for your platform, extract it, and place `oeffi` on your `P
 MacOS:
 
 ```bash
-VERSION=0.6.0
+VERSION=0.6.1
 # macOS Apple Silicon (aarch64)
 curl -L -o oeffi.tar.gz "https://github.com/ilosamos/oeffi/releases/download/v${VERSION}/oeffi-${VERSION}-aarch64-apple-darwin.tar.gz"
 tar -xzf oeffi.tar.gz
@@ -66,7 +66,7 @@ oeffi version
 Linux:
 
 ```bash
-VERSION=0.6.0
+VERSION=0.6.1
 # Linux x86_64
 curl -L -o oeffi.tar.gz "https://github.com/ilosamos/oeffi/releases/download/v${VERSION}/oeffi-${VERSION}-x86_64-unknown-linux-gnu.tar.gz"
 tar -xzf oeffi.tar.gz
