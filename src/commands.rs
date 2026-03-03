@@ -1,13 +1,15 @@
 use std::collections::{HashMap, HashSet};
+use std::fs;
 use std::path::Path;
 
 use crate::build::build_snapshot;
 use crate::cache::{load_or_build_snapshot, save_snapshot};
 use crate::config::{
-    AppConfig, LoadedConfig, config_keys, env_var_for_key, get_config_value, persist_file_config,
-    set_config_value,
+    AppConfig, LoadedConfig, config_keys, default_file_config, ensure_dirs_for_config,
+    env_var_for_key, get_config_value, persist_file_config, set_config_value,
 };
 use crate::download::download_gtfs_zip_to_dir;
+use crate::geocode;
 use crate::matcher::{
     GENERIC_QUERY_TOKENS, NameMatchMode, exact_key_case_insensitive, match_name_candidates,
     normalize_for_match, relaxed_name_matches,
@@ -17,22 +19,21 @@ use crate::route_planner::rebuild_planner_cache;
 use crate::snapshot::{StopCluster, StopRecord};
 
 const STOP_FUZZY_THRESHOLD: f64 = 0.94;
+const DEFAULT_VIENNA_POLYGON_PATH: &str = "data/poly.json";
 
 pub fn cmd_cache_build(
     config: &AppConfig,
-    source_path_override: Option<&str>,
-    cache_path_override: Option<&str>,
     download: bool,
 ) -> Result<(), String> {
-    let source_path = source_path_override.unwrap_or(&config.merged_gtfs_path);
-    let cache_path = cache_path_override.unwrap_or(&config.snapshot_cache_path);
+    let source_path = &config.merged_gtfs_path;
+    let cache_path = &config.snapshot_cache_path;
     let planner_cache_path = &config.planner_cache_path;
 
     if download {
         download_raw_data(config, true)?;
     } else {
         ensure_raw_sources_exist(config).map_err(|err| {
-            format!("{err}\nHint: run `oeffi cache-build --download` for first-time setup.")
+            format!("{err}\nHint: run `oeffi cache build --download` for first-time setup.")
         })?;
     }
 
@@ -48,6 +49,12 @@ pub fn cmd_cache_build(
     save_snapshot(cache_path, &snapshot)?;
     eprintln!("Rebuilding planner cache: {planner_cache_path}");
     let planner = rebuild_planner_cache(source_path, planner_cache_path)?;
+    eprintln!("Rebuilding geocode cache: {}", config.geocode_cache_path);
+    geocode::cmd_geocode_build(
+        &config.austria_osm_pbf_path,
+        DEFAULT_VIENNA_POLYGON_PATH,
+        &config.geocode_cache_path,
+    )?;
 
     println!("Built snapshot cache: {cache_path}");
     println!("  source: {}", snapshot.fingerprint.source_path);
@@ -60,6 +67,54 @@ pub fn cmd_cache_build(
     println!("  routes: {}", planner.routes_count());
     println!("  trips: {}", planner.trips_count());
 
+    Ok(())
+}
+
+fn remove_path_if_exists(path: &Path) -> Result<bool, String> {
+    let meta = match fs::symlink_metadata(path) {
+        Ok(meta) => meta,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(err) => {
+            return Err(format!(
+                "Failed to read metadata for '{}': {err}",
+                path.display()
+            ));
+        }
+    };
+
+    if meta.is_dir() {
+        fs::remove_dir_all(path)
+            .map_err(|err| format!("Failed to remove directory '{}': {err}", path.display()))?;
+    } else {
+        fs::remove_file(path)
+            .map_err(|err| format!("Failed to remove file '{}': {err}", path.display()))?;
+    }
+    Ok(true)
+}
+
+pub fn cmd_cache_erase(config: &AppConfig) -> Result<(), String> {
+    let mut removed = 0_usize;
+
+    for path_str in [
+        &config.snapshot_cache_path,
+        &config.planner_cache_path,
+        &config.geocode_cache_path,
+        &config.merged_gtfs_path,
+        &config.austria_osm_pbf_path,
+        &config.raw_data_root,
+    ] {
+        let path = Path::new(path_str);
+        if remove_path_if_exists(path)? {
+            removed += 1;
+            println!("Removed: {}", path.display());
+        }
+    }
+
+    if removed == 0 {
+        println!("Nothing to erase.");
+    } else {
+        println!("Erased local caches and raw data.");
+    }
     Ok(())
 }
 
@@ -80,7 +135,7 @@ pub fn cmd_init(config: &AppConfig, force: bool) -> Result<(), String> {
 
     eprintln!("Initializing local data and caches ...");
     download_raw_data(config, true)?;
-    cmd_cache_build(config, None, None, false)?;
+    cmd_cache_build(config, false)?;
     eprintln!("Initialization complete.");
     Ok(())
 }
@@ -103,6 +158,21 @@ pub fn cmd_gtfs_summary(config: &AppConfig) -> Result<(), String> {
     println!("  stops: {}", snapshot.summary.stops);
     println!("  calendars: {}", snapshot.summary.calendars);
     println!("  calendar_dates: {}", snapshot.summary.calendar_dates);
+
+    println!("Geo data summary (via cache: {})", config.geocode_cache_path);
+    match geocode::load_summary(&config.geocode_cache_path) {
+        Ok(summary) => {
+            println!("  cache_version: {}", summary.version);
+            println!("  unique_addresses: {}", summary.unique_addresses);
+            println!("  unique_landmarks: {}", summary.unique_landmarks);
+            println!("  source_pbf: {}", summary.source_pbf);
+            println!("  polygon: {}", summary.polygon_path);
+        }
+        Err(err) => {
+            println!("  unavailable: {err}");
+            println!("  hint: run `oeffi cache build` to rebuild geodata cache.");
+        }
+    }
 
     Ok(())
 }
@@ -567,6 +637,23 @@ pub fn cmd_config_set(loaded: &LoadedConfig, key: &str, value: &str) -> Result<(
         && loaded.env_overrides.contains(env_name)
     {
         println!("Note: currently overridden by env var {env_name}");
+    }
+    Ok(())
+}
+
+pub fn cmd_config_reset(loaded: &LoadedConfig) -> Result<(), String> {
+    let defaults = default_file_config(&loaded.paths);
+    ensure_dirs_for_config(&loaded.paths, &defaults)?;
+    persist_file_config(&loaded.paths, &defaults)?;
+
+    println!(
+        "Reset config to defaults in {}",
+        loaded.paths.config_path.display()
+    );
+    if !loaded.env_overrides.is_empty() {
+        println!(
+            "Note: one or more values may still be overridden by environment variables."
+        );
     }
     Ok(())
 }

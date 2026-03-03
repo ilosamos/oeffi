@@ -6,6 +6,7 @@ mod clustering;
 mod commands;
 mod config;
 mod download;
+mod geocode;
 mod matcher;
 mod merge;
 mod route_planner;
@@ -35,6 +36,7 @@ fn run(command: Command) -> ExitCode {
             from,
             to,
             debug,
+            verbose,
             alternatives,
             depart_secs,
             service_date,
@@ -43,43 +45,25 @@ fn run(command: Command) -> ExitCode {
             &from,
             &to,
             debug,
-            alternatives,
-            depart_secs,
-            service_date,
-        ),
-        Command::RouteCoords {
-            from_lat,
-            from_lon,
-            to_lat,
-            to_lon,
-            debug,
-            alternatives,
-            depart_secs,
-            service_date,
-        } => route_planner::cmd_route_plan_coords(
-            cfg,
-            from_lat,
-            from_lon,
-            to_lat,
-            to_lon,
-            debug,
+            verbose,
             alternatives,
             depart_secs,
             service_date,
         ),
         Command::Line { route } => commands::cmd_route_stops(cfg, &route),
         Command::Inspect { query } => commands::cmd_stop_inspect(cfg, &query),
-        Command::CacheBuild {
-            source_path,
-            cache_path,
-            download,
-        } => {
-            commands::cmd_cache_build(cfg, source_path.as_deref(), cache_path.as_deref(), download)
-        }
+        Command::CacheBuild { download } => commands::cmd_cache_build(cfg, download),
+        Command::CacheErase => commands::cmd_cache_erase(cfg),
         Command::Init { force } => commands::cmd_init(cfg, force),
         Command::ConfigList => commands::cmd_config_list(&loaded),
         Command::ConfigGet { key } => commands::cmd_config_get(&loaded, &key),
         Command::ConfigSet { key, value } => commands::cmd_config_set(&loaded, &key, &value),
+        Command::ConfigReset => commands::cmd_config_reset(&loaded),
+        Command::Geocode {
+            query,
+            cache_path,
+            limit,
+        } => geocode::cmd_geocode_find(&cache_path, &query, limit),
         Command::Version => {
             println!("oeffi {APP_VERSION}");
             Ok(())
@@ -97,7 +81,7 @@ fn run(command: Command) -> ExitCode {
             if commands::is_missing_local_data_error(&message) && !message.contains("Hint:") {
                 eprintln!("Hint: run `oeffi init` for first-time setup.");
                 eprintln!(
-                    "Hint: or run `oeffi cache-build --download` to fetch raw GTFS data and rebuild caches."
+                    "Hint: or run `oeffi cache build --download` to fetch raw GTFS data and rebuild caches."
                 );
             }
             eprintln!("Run `oeffi help` for usage.");

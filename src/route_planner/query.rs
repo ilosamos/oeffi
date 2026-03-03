@@ -12,7 +12,7 @@ use super::model::{
 use super::raptor_adapter::PlannerTimetable;
 
 const EARTH_RADIUS_M: f64 = 6_371_000.0;
-const WALK_METERS_PER_SECOND: f64 = 1.2;
+const WALK_METERS_PER_SECOND: f64 = 0.9;
 const MAX_COORD_CANDIDATES: usize = 12;
 const MAX_ACCESS_DISTANCE_METERS: f64 = 1_200.0;
 const TRANSFER_PENALTY_SECONDS: usize = 240;

@@ -7,41 +7,36 @@ pub const APP_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 #[derive(Debug)]
 pub enum Command {
-    Summary,
-    ListRoutes,
-    ListStops,
+    Init {
+        force: bool,
+    },
     Route {
         from: String,
         to: String,
         debug: bool,
+        verbose: bool,
         alternatives: usize,
         depart_secs: Option<usize>,
         service_date: Option<NaiveDate>,
     },
-    RouteCoords {
-        from_lat: f64,
-        from_lon: f64,
-        to_lat: f64,
-        to_lon: f64,
-        debug: bool,
-        alternatives: usize,
-        depart_secs: Option<usize>,
-        service_date: Option<NaiveDate>,
-    },
-    Line {
-        route: String,
+    Geocode {
+        query: String,
+        cache_path: String,
+        limit: usize,
     },
     Inspect {
         query: String,
     },
+    ListStops,
+    Line {
+        route: String,
+    },
+    Summary,
+    ListRoutes,
     CacheBuild {
-        source_path: Option<String>,
-        cache_path: Option<String>,
         download: bool,
     },
-    Init {
-        force: bool,
-    },
+    CacheErase,
     ConfigList,
     ConfigGet {
         key: String,
@@ -50,6 +45,7 @@ pub enum Command {
         key: String,
         value: String,
     },
+    ConfigReset,
     Version,
     Help,
 }
@@ -62,19 +58,23 @@ pub enum Command {
     disable_help_subcommand = true,
     next_line_help = true,
     after_help = "Examples:
+  oeffi init
   oeffi route \"Karlsplatz\" \"Praterstern\"
+  oeffi route \"Praterstern\" \"Mochi Ramen Bar\" --verbose
+  oeffi route \"48.2066 16.3707\" \"48.1850 16.3747\"
+  oeffi geocode \"mariahilfer strasse 1\"
+  oeffi geocode \"stephansdom\" --limit 3
+  oeffi inspect Karlsplatz
+  oeffi stops
   oeffi route \"Herrengasse\" \"Praterstern\" --debug --alts 3
   oeffi route \"Herrengasse\" \"Praterstern\" --depart 22:15
   oeffi route \"Herrengasse\" \"Praterstern\" --date 2026-03-02 --depart 08:15
-  oeffi route-coords 48.2066 16.3707 48.1850 16.3747
   oeffi line U1
-  oeffi stops
-  oeffi inspect Karlsplatz
   oeffi routes
   oeffi summary
-  oeffi cache-build
-  oeffi cache-build --download
-  oeffi init
+  oeffi cache build
+  oeffi cache build --download
+  oeffi cache erase
   oeffi version
   oeffi config list
   oeffi config get merged_gtfs_path
@@ -87,12 +87,19 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum CliCommand {
-    #[command(about = "Plan a route between two stops (id/name)")]
+    #[command(about = "First-run setup: download feeds, merge, and build caches")]
+    Init {
+        #[arg(short = 'f', long = "force", help = "Overwrite existing raw GTFS data")]
+        force: bool,
+    },
+    #[command(about = "Plan a route between two locations (stop/geocode/\"lat lon\")")]
     Route {
         from: String,
         to: String,
         #[arg(short = 'd', long = "debug")]
         debug: bool,
+        #[arg(short = 'v', long = "verbose")]
+        verbose: bool,
         #[arg(long = "alts", default_value_t = 3, value_parser = parse_positive_usize)]
         alternatives: usize,
         #[arg(long = "depart", value_name = "HH:MM", value_parser = parse_depart_hhmm)]
@@ -100,47 +107,28 @@ enum CliCommand {
         #[arg(long = "date", value_name = "YYYY-MM-DD", value_parser = parse_service_date)]
         service_date: Option<NaiveDate>,
     },
-    #[command(name = "route-coords", about = "Plan a route between two coordinates")]
-    RouteCoords {
-        #[arg(value_parser = parse_lat)]
-        from_lat: f64,
-        #[arg(value_parser = parse_lon)]
-        from_lon: f64,
-        #[arg(value_parser = parse_lat)]
-        to_lat: f64,
-        #[arg(value_parser = parse_lon)]
-        to_lon: f64,
-        #[arg(short = 'd', long = "debug")]
-        debug: bool,
-        #[arg(long = "alts", default_value_t = 3, value_parser = parse_positive_usize)]
-        alternatives: usize,
-        #[arg(long = "depart", value_name = "HH:MM", value_parser = parse_depart_hhmm)]
-        depart_secs: Option<usize>,
-        #[arg(long = "date", value_name = "YYYY-MM-DD", value_parser = parse_service_date)]
-        service_date: Option<NaiveDate>,
+    #[command(about = "Find coordinates for addresses, landmarks, restaurants, and other named places")]
+    Geocode {
+        query: String,
+        #[arg(long = "cache", default_value = "data/vienna-addresses.cache.bin")]
+        cache_path: String,
+        #[arg(long = "limit", default_value_t = 10, value_parser = parse_positive_usize)]
+        limit: usize,
     },
-    #[command(about = "List all stops in order for a line (all variants)")]
-    Line { route: String },
-    #[command(about = "List all clustered stops (name + cluster key)")]
-    Stops,
     #[command(about = "Inspect stop by id/code/name and list serving routes")]
     Inspect { query: String },
+    #[command(about = "List all clustered stops (name + cluster key)")]
+    Stops,
+    #[command(about = "List all stops in order for a line (all variants)")]
+    Line { route: String },
     #[command(about = "List all routes (id, short name, long name)")]
     Routes,
-    #[command(about = "Rebuild snapshot + planner caches")]
-    CacheBuild {
-        source_path: Option<String>,
-        cache_path: Option<String>,
-        #[arg(
-            long = "download",
-            help = "Download raw GTFS feeds before rebuilding caches"
-        )]
-        download: bool,
-    },
-    #[command(about = "First-run setup: download feeds, merge, and build caches")]
-    Init {
-        #[arg(short = 'f', long = "force", help = "Overwrite existing raw GTFS data")]
-        force: bool,
+    #[command(about = "Show high-level GTFS dataset stats")]
+    Summary,
+    #[command(about = "Manage local caches and raw data")]
+    Cache {
+        #[command(subcommand)]
+        command: CacheSubcommand,
     },
     #[command(about = "Read and write persistent configuration")]
     Config {
@@ -149,8 +137,6 @@ enum CliCommand {
     },
     #[command(about = "Print version")]
     Version,
-    #[command(about = "Show high-level GTFS dataset stats")]
-    Summary,
     #[command(about = "Show help message")]
     Help,
 }
@@ -163,6 +149,22 @@ enum ConfigSubcommand {
     Get { key: String },
     #[command(about = "Write one config value to config.json")]
     Set { key: String, value: String },
+    #[command(about = "Reset config.json to default values")]
+    Reset,
+}
+
+#[derive(Debug, Subcommand)]
+enum CacheSubcommand {
+    #[command(about = "Rebuild snapshot + planner caches")]
+    Build {
+        #[arg(
+            long = "download",
+            help = "Download raw GTFS feeds before rebuilding caches"
+        )]
+        download: bool,
+    },
+    #[command(about = "Erase all local raw data and cache files")]
+    Erase,
 }
 
 fn parse_depart_hhmm(value: &str) -> Result<usize, String> {
@@ -197,30 +199,6 @@ fn parse_service_date(value: &str) -> Result<NaiveDate, String> {
         .map_err(|_| format!("invalid date '{value}', expected YYYY-MM-DD"))
 }
 
-fn parse_lat(value: &str) -> Result<f64, String> {
-    let lat = value
-        .parse::<f64>()
-        .map_err(|_| format!("invalid latitude '{value}'"))?;
-    if !(-90.0..=90.0).contains(&lat) {
-        return Err(format!(
-            "invalid latitude '{value}', expected range [-90, 90]"
-        ));
-    }
-    Ok(lat)
-}
-
-fn parse_lon(value: &str) -> Result<f64, String> {
-    let lon = value
-        .parse::<f64>()
-        .map_err(|_| format!("invalid longitude '{value}'"))?;
-    if !(-180.0..=180.0).contains(&lon) {
-        return Err(format!(
-            "invalid longitude '{value}', expected range [-180, 180]"
-        ));
-    }
-    Ok(lon)
-}
-
 pub fn parse_command(args: &[String]) -> Result<Command, clap::Error> {
     let parsed = Cli::try_parse_from(iter::once("oeffi").chain(args.iter().map(String::as_str)))?;
     Ok(match parsed.command {
@@ -228,6 +206,7 @@ pub fn parse_command(args: &[String]) -> Result<Command, clap::Error> {
             from,
             to,
             debug,
+            verbose,
             alternatives,
             depart_secs,
             service_date,
@@ -235,50 +214,37 @@ pub fn parse_command(args: &[String]) -> Result<Command, clap::Error> {
             from,
             to,
             debug,
+            verbose,
             alternatives,
             depart_secs,
             service_date,
         },
-        Some(CliCommand::RouteCoords {
-            from_lat,
-            from_lon,
-            to_lat,
-            to_lon,
-            debug,
-            alternatives,
-            depart_secs,
-            service_date,
-        }) => Command::RouteCoords {
-            from_lat,
-            from_lon,
-            to_lat,
-            to_lon,
-            debug,
-            alternatives,
-            depart_secs,
-            service_date,
-        },
+        Some(CliCommand::Init { force }) => Command::Init { force },
         Some(CliCommand::Line { route }) => Command::Line { route },
         Some(CliCommand::Stops) => Command::ListStops,
         Some(CliCommand::Inspect { query }) => Command::Inspect { query },
-        Some(CliCommand::Routes) => Command::ListRoutes,
-        Some(CliCommand::CacheBuild {
-            source_path,
+        Some(CliCommand::Geocode {
+            query,
             cache_path,
-            download,
-        }) => Command::CacheBuild {
-            source_path,
+            limit,
+        }) => Command::Geocode {
+            query,
             cache_path,
-            download,
+            limit,
         },
-        Some(CliCommand::Init { force }) => Command::Init { force },
+        Some(CliCommand::Routes) => Command::ListRoutes,
+        Some(CliCommand::Summary) => Command::Summary,
+        Some(CliCommand::Cache { command }) => match command {
+            CacheSubcommand::Build { download } => Command::CacheBuild { download },
+            CacheSubcommand::Erase => Command::CacheErase,
+        },
         Some(CliCommand::Config { command }) => match command {
             ConfigSubcommand::List => Command::ConfigList,
             ConfigSubcommand::Get { key } => Command::ConfigGet { key },
             ConfigSubcommand::Set { key, value } => Command::ConfigSet { key, value },
+            ConfigSubcommand::Reset => Command::ConfigReset,
         },
         Some(CliCommand::Version) => Command::Version,
-        Some(CliCommand::Summary) => Command::Summary,
         Some(CliCommand::Help) | None => Command::Help,
     })
 }
@@ -328,10 +294,11 @@ mod tests {
     fn parses_route() {
         assert!(matches!(
             parse_to_command(&["route", "Karlsplatz", "Praterstern"]),
-            Command::Route { from, to, debug, alternatives, depart_secs, service_date }
+            Command::Route { from, to, debug, verbose, alternatives, depart_secs, service_date }
                 if from == "Karlsplatz"
                     && to == "Praterstern"
                     && !debug
+                    && !verbose
                     && alternatives == 3
                     && depart_secs.is_none()
                     && service_date.is_none()
@@ -365,32 +332,22 @@ mod tests {
     }
 
     #[test]
-    fn parses_route_coords() {
+    fn parses_route_with_coord_pair_strings() {
         assert!(matches!(
-            parse_to_command(&[
-                "route-coords",
-                "48.2066",
-                "16.3707",
-                "48.1850",
-                "16.3747",
-                "--alts",
-                "2"
-            ]),
-            Command::RouteCoords {
-                from_lat,
-                from_lon,
-                to_lat,
-                to_lon,
+            parse_to_command(&["route", "48.2066 16.3707", "48.1850 16.3747", "--alts", "2"]),
+            Command::Route {
+                from,
+                to,
                 debug,
+                verbose,
                 alternatives,
                 depart_secs,
                 service_date
             }
-            if (from_lat - 48.2066).abs() < f64::EPSILON
-                && (from_lon - 16.3707).abs() < f64::EPSILON
-                && (to_lat - 48.1850).abs() < f64::EPSILON
-                && (to_lon - 16.3747).abs() < f64::EPSILON
+            if from == "48.2066 16.3707"
+                && to == "48.1850 16.3747"
                 && !debug
+                && !verbose
                 && alternatives == 2
                 && depart_secs.is_none()
                 && service_date.is_none()
@@ -398,19 +355,34 @@ mod tests {
     }
 
     #[test]
+    fn parses_route_verbose() {
+        assert!(matches!(
+            parse_to_command(&["route", "Praterstern", "Mochi Ramen Bar", "--verbose"]),
+            Command::Route { verbose, .. } if verbose
+        ));
+    }
+
+    #[test]
     fn parses_cache_build_defaults() {
         assert!(matches!(
-            parse_to_command(&["cache-build"]),
-            Command::CacheBuild { source_path, cache_path, download }
-                if source_path.is_none() && cache_path.is_none() && !download
+            parse_to_command(&["cache", "build"]),
+            Command::CacheBuild { download } if !download
         ));
     }
 
     #[test]
     fn parses_cache_build_with_download() {
         assert!(matches!(
-            parse_to_command(&["cache-build", "--download"]),
+            parse_to_command(&["cache", "build", "--download"]),
             Command::CacheBuild { download, .. } if download
+        ));
+    }
+
+    #[test]
+    fn parses_cache_erase() {
+        assert!(matches!(
+            parse_to_command(&["cache", "erase"]),
+            Command::CacheErase
         ));
     }
 
@@ -448,8 +420,25 @@ mod tests {
     }
 
     #[test]
+    fn parses_config_reset() {
+        assert!(matches!(
+            parse_to_command(&["config", "reset"]),
+            Command::ConfigReset
+        ));
+    }
+
+    #[test]
     fn parses_version() {
         assert!(matches!(parse_to_command(&["version"]), Command::Version));
+    }
+
+    #[test]
+    fn parses_geocode_with_limit() {
+        assert!(matches!(
+            parse_to_command(&["geocode", "karntner strasse 1", "--limit", "5"]),
+            Command::Geocode { query, limit, .. }
+                if query == "karntner strasse 1" && limit == 5
+        ));
     }
 
     #[test]

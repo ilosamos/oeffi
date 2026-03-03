@@ -22,6 +22,11 @@ fn format_delta_secs(secs: usize) -> String {
     }
 }
 
+fn format_walk_minutes(secs: usize) -> String {
+    let mins = secs.div_ceil(60);
+    format!("{mins}m")
+}
+
 fn station_label_debug(cache: &PlannerCache, station_idx: u32) -> String {
     let station = &cache.stations[station_idx as usize];
     let preview: Vec<&str> = station
@@ -50,7 +55,7 @@ fn print_option(cache: &PlannerCache, option: &RouteOption, debug: bool) {
     if option.access_secs > 0 {
         println!(
             "  Walk to start station: {}",
-            format_delta_secs(option.access_secs)
+            format_walk_minutes(option.access_secs)
         );
     }
     for (idx, leg) in option.legs.iter().enumerate() {
@@ -79,7 +84,7 @@ fn print_option(cache: &PlannerCache, option: &RouteOption, debug: bool) {
     if option.egress_secs > 0 {
         println!(
             "  Walk from destination station: {}",
-            format_delta_secs(option.egress_secs)
+            format_walk_minutes(option.egress_secs)
         );
     }
 }
@@ -98,7 +103,7 @@ pub fn print_route_plan(cache: &PlannerCache, result: &RoutePlanResult, debug: b
     if result.chosen_access_secs > 0 || result.chosen_egress_secs > 0 {
         println!(
             "Door-to-door walking: {}",
-            format_delta_secs(result.chosen_access_secs + result.chosen_egress_secs)
+            format_walk_minutes(result.chosen_access_secs + result.chosen_egress_secs)
         );
     }
 
@@ -200,7 +205,7 @@ pub fn print_route_plan(cache: &PlannerCache, result: &RoutePlanResult, debug: b
                     format_secs_hhmm(alt.adjusted_arrival),
                     format_delta_secs(delay),
                     alt.legs.len(),
-                    format_delta_secs(alt.access_secs + alt.egress_secs)
+                    format_walk_minutes(alt.access_secs + alt.egress_secs)
                 );
                 println!(
                     "    pair: {} -> {}",
