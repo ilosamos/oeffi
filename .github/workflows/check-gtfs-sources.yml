@@ -1,0 +1,77 @@
+name: Check GTFS Sources
+
+on:
+  workflow_dispatch:
+  schedule:
+    # Runs daily; gate below enforces exact "every X days" cadence.
+    - cron: "17 4 * * *"
+
+jobs:
+  check-availability:
+    name: Check Wiener Linien and OEBB source URLs
+    runs-on: ubuntu-22.04
+    env:
+      # Change this to your preferred interval.
+      CHECK_EVERY_DAYS: "3"
+      # Anchor date for modulo calculation (YYYY-MM-DD).
+      CHECK_ANCHOR_DATE: "2026-03-10"
+      WIENER_LINIEN_GTFS_URL: "http://www.wienerlinien.at/ogd_realtime/doku/ogd/gtfs/gtfs.zip"
+      OEBB_GTFS_URL: "https://static.web.oebb.at/open-data/soll-fahrplan-gtfs/GTFS_Fahrplan_2026.zip"
+    steps:
+      - name: Decide whether this is a check day
+        # GitHub cron does not support "every X days" directly.
+        id: gate
+        shell: bash
+        run: |
+          set -euo pipefail
+          x="${CHECK_EVERY_DAYS}"
+          if ! [[ "$x" =~ ^[0-9]+$ ]] || [ "$x" -le 0 ]; then
+            echo "CHECK_EVERY_DAYS must be a positive integer, got: '$x'"
+            exit 1
+          fi
+
+          anchor_epoch="$(date -u -d "${CHECK_ANCHOR_DATE}" +%s)"
+          now_epoch="$(date -u +%s)"
+          days_since="$(( (now_epoch - anchor_epoch) / 86400 ))"
+
+          if [ "$days_since" -lt 0 ]; then
+            echo "CHECK_ANCHOR_DATE is in the future: ${CHECK_ANCHOR_DATE}"
+            exit 1
+          fi
+
+          if [ $(( days_since % x )) -ne 0 ]; then
+            echo "run_check=false" >> "$GITHUB_OUTPUT"
+            echo "Skipping today: every ${x} days from ${CHECK_ANCHOR_DATE}."
+            exit 0
+          fi
+
+          echo "run_check=true" >> "$GITHUB_OUTPUT"
+          echo "Running checks: every ${x} days from ${CHECK_ANCHOR_DATE}."
+
+      - name: Validate Wiener Linien URL
+        if: steps.gate.outputs.run_check == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          url="${WIENER_LINIEN_GTFS_URL}"
+          echo "Checking Wiener Linien: ${url}"
+
+          # Try HEAD first, then fallback to ranged GET for endpoints that reject HEAD.
+          if curl -fLIsS --max-time 45 "$url" >/dev/null; then
+            exit 0
+          fi
+          curl -fLsS --max-time 60 --range 0-0 -o /dev/null "$url"
+
+      - name: Validate OEBB URL
+        if: steps.gate.outputs.run_check == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          url="${OEBB_GTFS_URL}"
+          echo "Checking OEBB: ${url}"
+
+          # Try HEAD first, then fallback to ranged GET for endpoints that reject HEAD.
+          if curl -fLIsS --max-time 45 "$url" >/dev/null; then
+            exit 0
+          fi
+          curl -fLsS --max-time 60 --range 0-0 -o /dev/null "$url"
